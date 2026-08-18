@@ -181,4 +181,4 @@ pnpm dev              # Studio 开发模式（Vite）
 
 ## 📃 License
 
-MIT（发布前补齐 LICENSE 文件）
+[MIT](LICENSE) © 2026 trrrrrryg
