@@ -85,6 +85,9 @@ test("garbage collector prunes only provably dead records and rotates a large jo
     await core.store.write(`patches/${designId}/fresh.json`, { appliedAt: freshIso });
     await core.store.write("transactions/old.json", { failedAt: oldIso });
     await core.store.write("transactions/fresh.json", { failedAt: freshIso });
+    await core.store.write("transactions/old-committed.json", { state: "committed", committedAt: oldIso });
+    await core.store.write("transactions/old-prepared.json", { state: "prepared", createdAt: oldIso });
+    await core.store.write("transactions/fresh-prepared.json", { state: "prepared", createdAt: freshIso });
     await core.store.write(`isolated-preview-sessions/${previewId}.json`, { state: "stopped", createdAt: oldIso });
     await core.store.write("isolated-preview-sessions/fresh-live.json", { state: "live", createdAt: oldIso });
     await core.store.write(`isolated-preview-runtime/${previewId}/plugin/package.json`, { name: "junk" });
@@ -97,7 +100,7 @@ test("garbage collector prunes only provably dead records and rotates a large jo
     assert.equal(summary.confirmations, 2);
     assert.equal(summary.operations, 1);
     assert.equal(summary.patches, 1);
-    assert.equal(summary.transactions, 1);
+    assert.equal(summary.transactions, 3);
     assert.equal(summary.previewSessions, 1);
     assert.equal(summary.previewRuntimeDirs, 1);
     assert.equal(summary.cleanupRecords, 1);
@@ -110,6 +113,7 @@ test("garbage collector prunes only provably dead records and rotates a large jo
     assert.notEqual(await core.store.read("operations/old-pending.json"), null);
     assert.notEqual(await core.store.read(`patches/${designId}/fresh.json`), null);
     assert.notEqual(await core.store.read("transactions/fresh.json"), null);
+    assert.notEqual(await core.store.read("transactions/fresh-prepared.json"), null);
     assert.notEqual(await core.store.read("isolated-preview-sessions/fresh-live.json"), null);
     // Dead records are gone.
     assert.equal(await core.store.read("browser-sessions/expired.json"), null);
@@ -117,6 +121,8 @@ test("garbage collector prunes only provably dead records and rotates a large jo
     assert.equal(await core.store.read("operations/old-done.json"), null);
     assert.equal(await core.store.read(`patches/${designId}/old.json`), null);
     assert.equal(await core.store.read("transactions/old.json"), null);
+    assert.equal(await core.store.read("transactions/old-committed.json"), null);
+    assert.equal(await core.store.read("transactions/old-prepared.json"), null);
     assert.equal(await core.store.read(`isolated-preview-sessions/${previewId}.json`), null);
     assert.equal(await core.store.read(`isolated-preview-cleanup/${previewId}.json`), null);
     // The journal rotated into a timestamped archive instead of being pruned.

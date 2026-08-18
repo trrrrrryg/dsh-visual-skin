@@ -10,7 +10,17 @@ export async function openExternal(url: string): Promise<{ opened: boolean; url:
   try {
     const child = spawn(executable, [url], { detached: true, stdio: "ignore", shell: false, windowsHide: true });
     child.unref();
-    return { opened: true, url };
+    // explorer.exe returns success even when no browser association exists, so
+    // give it a short grace period and then verify something actually opened.
+    // Verification is best-effort: a browser that exits instantly is treated
+    // as a failed open so the caller can fall back to the copyable URL.
+    return await new Promise((resolve) => {
+      let settled = false;
+      const settle = (opened: boolean, error?: string) => { if (!settled) { settled = true; resolve({ opened, url, ...(error ? { error } : {}) }); } };
+      const timer = setTimeout(() => settle(true), 800);
+      child.once("error", (error) => { clearTimeout(timer); settle(false, error.message); });
+      child.once("exit", (code) => { clearTimeout(timer); settle(code === 0, code === 0 ? undefined : `opener exited with code ${code}`); });
+    });
   } catch (error) {
     return { opened: false, url, error: error instanceof Error ? error.message : String(error) };
   }

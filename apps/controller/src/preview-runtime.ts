@@ -280,9 +280,17 @@ export class PreviewRuntime {
     const current = await this.getRecord(id);
     if (["stopped", "expired", "failed-safe"].includes(current.state)) return this.public(current);
     const stopping: SessionRecord = { ...current, state: "stopping" }; await this.save(stopping); this.options.changed(this.public(stopping));
-    await this.cleanupOwnedRuntime(id);
+    let cleanupError: string | undefined;
+    try { await this.cleanupOwnedRuntime(id); } catch (error) { cleanupError = error instanceof Error ? error.message : String(error); }
     const timer = this.timers.get(id); if (timer) clearTimeout(timer); this.timers.delete(id);
     this.sessionSecrets.delete(id);
+    if (cleanupError) {
+      // A failed cleanup must not strand the session in "stopping" forever:
+      // fail safe with the reason so the successor/GC can retry the runtime
+      // dirs, and the terminal state keeps TTL accounting bounded.
+      const failed: SessionRecord = { ...stopping, state: "failed-safe", error: { code: ERROR_CODES.unavailable, message: cleanupError } }; await this.save(failed); this.options.changed(this.public(failed));
+      return this.public(failed);
+    }
     const done: SessionRecord = { ...stopping, state: expired ? "expired" : "stopped" }; await this.save(done); this.options.changed(this.public(done));
     return this.public(done);
   }

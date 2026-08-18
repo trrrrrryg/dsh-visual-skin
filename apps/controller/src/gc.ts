@@ -1,5 +1,6 @@
 import { rename, rm, stat } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import type { DesignSessionCore } from "@dsh-skin/design-session-core";
 
 const DAY_MS = 24 * 60 * 60_000;
@@ -89,8 +90,15 @@ export async function runGarbageCollection(core: DesignSessionCore, options: { r
       }
     }
     for (const name of await core.store.list("transactions", ".json")) {
-      const record = await core.store.read<{ failedAt?: string }>(`transactions/${name}`);
-      if (record !== null && record.failedAt !== undefined && now - Date.parse(record.failedAt) > DAY_MS) {
+      // Every terminal state is reclaimed: committed (successful apply/restore/
+      // install/uninstall), failed-safe/rollback-incomplete (rolled back), and
+      // prepared (crash residue — nothing reads prepared transactions after a
+      // Controller restart, so an old one is provably dead).
+      const record = await core.store.read<{ state?: string; committedAt?: string; failedAt?: string; createdAt?: string }>(`transactions/${name}`);
+      if (record === null) { await core.store.remove(`transactions/${name}`); summary.transactions += 1; continue; }
+      const state = record.state ?? "";
+      const stamp = record.committedAt ?? record.failedAt ?? (state === "prepared" ? record.createdAt : undefined);
+      if (stamp !== undefined && now - Date.parse(stamp) > DAY_MS) {
         await core.store.remove(`transactions/${name}`);
         summary.transactions += 1;
       }
@@ -109,6 +117,19 @@ export async function runGarbageCollection(core: DesignSessionCore, options: { r
       try {
         await rm(core.store.path("isolated-preview-runtime", id), { recursive: true, force: true });
         summary.previewRuntimeDirs += 1;
+      } catch { /* the dir may already be gone */ }
+      try {
+        // Orphaned disposable homes (%TEMP%\dsh-skin-isolated-<uuid>.dsh) are
+        // reaped here too. reconcile() deliberately keeps them when process
+        // ownership cannot be proven (PID-reuse safety), so this is the only
+        // bounded retry path for that residue once the session record itself
+        // is terminal and older than one day.
+        const home = join(tmpdir(), `dsh-skin-isolated-${id}.dsh`);
+        const expected = resolve(tmpdir()).toLowerCase();
+        if (resolve(home).toLowerCase().startsWith(`${expected}${process.platform === "win32" ? "\\" : "/"}dsh-skin-isolated-`) && (await stat(home).catch(() => null)) !== null) {
+          await rm(home, { recursive: true, force: true });
+          summary.previewRuntimeDirs += 1;
+        }
       } catch { /* the dir may already be gone */ }
     }
     if (removedPreviewIds.length > 0) {

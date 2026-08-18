@@ -29,10 +29,23 @@ $skillRoot = Join-Path $projectRoot "agents\codex-skill\deepseek-harness-skin-st
 if (-not (Test-Path -LiteralPath (Join-Path $skillRoot "SKILL.md") -PathType Leaf)) {
   throw "Skill folder not found: $skillRoot"
 }
-if ([string]::IsNullOrWhiteSpace($DshHome)) { $DshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE ".dsh" } }
+if ([string]::IsNullOrWhiteSpace($DshHome)) { $DshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $USERPROFILE ".dsh" } }
 $DshHome = [IO.Path]::GetFullPath($DshHome)
 if ([string]::IsNullOrWhiteSpace($DataDir)) { $DataDir = Join-Path $env:LOCALAPPDATA "DeepSeekHarnessSkinStudio" }
 $DataDir = [IO.Path]::GetFullPath($DataDir)
+
+# PowerShell 5.1's Set-Content -Encoding UTF8 writes a BOM, which breaks the
+# Controller's JSON.parse of every record file it reads. Always write UTF-8
+# without a BOM so the installer works identically under powershell.exe (5.1)
+# and pwsh (7+). Both call styles must work: `... | Set-Utf8NoBom $path`
+# (piped text) and `Set-Utf8NoBom $path $text` (positional).
+function Set-Utf8NoBom {
+  param(
+    [Parameter(Mandatory = $true, Position = 0)][string]$Path,
+    [Parameter(Mandatory = $true, Position = 1, ValueFromPipeline = $true)][AllowEmptyString()][string]$Text
+  )
+  process { [System.IO.File]::WriteAllText($Path, $Text, (New-Object System.Text.UTF8Encoding($false))) }
+}
 
 # --- 0. portable runtime -----------------------------------------------------
 $runtime = Join-Path $skillRoot "runtime"
@@ -51,7 +64,7 @@ $profilesNodeModules = Join-Path $DshHome "profiles\node_modules\@dsh-skin"
 $pluginTarget = Join-Path $profilesNodeModules "dsh-plugin"
 $patchPath = Join-Path $profileDir "cordis.patch.yml"
 $skillTarget = Join-Path $DshHome "skills\deepseek-harness-skin-studio"
-$themeFile = Join-Path $DataDir "active\web.json"
+$themeFile = Join-Path $DataDir "active\$ProfileName.json"
 $assetDir = Join-Path $DataDir "assets\content"
 $controllerUrl = "http://127.0.0.1:$ControllerPort"
 $nodePath = (Get-Command node -ErrorAction Stop).Source
@@ -88,12 +101,22 @@ if (-not $SkipSkill) {
     runtimeRoot = "runtime"
     controllerUrl = $controllerUrl
     installedAt = (Get-Date).ToUniversalTime().ToString("o")
-  } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $skillTarget "runtime.local.json") -Encoding UTF8
+  } | ConvertTo-Json | Set-Utf8NoBom (Join-Path $skillTarget "runtime.local.json")
   $runtime = Join-Path $skillTarget "runtime"
 }
 $controllerEntry = Join-Path $runtime "node_modules\@dsh-skin\controller\dist\index.js"
 $mcpEntry = Join-Path $runtime "node_modules\@dsh-skin\mcp-server\dist\index.js"
 $pluginSource = Join-Path $runtime "plugin"
+# -SkipSkill keeps the source-checkout runtime only when that runtime is
+# actually the installed one; otherwise the patch/MCP entries would point at
+# the checkout and break the self-contained contract after the source moves.
+if ($SkipSkill -and -not $SkipBuild) {
+  $resolvedRuntime = (Resolve-Path -LiteralPath $runtime -ErrorAction SilentlyContinue).Path
+  $dshHomePrefix = (Resolve-Path -LiteralPath $DshHome).Path.TrimEnd('\') + '\'
+  if ([string]::IsNullOrWhiteSpace($resolvedRuntime) -or -not $resolvedRuntime.StartsWith($dshHomePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "-SkipSkill requires an installed portable runtime under $DshHome (run a full install once); the source checkout runtime would break the self-contained install."
+  }
+}
 
 # --- 5. write cordis.patch.yml (idempotent) ---------------------------------
 New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
@@ -133,7 +156,7 @@ $mcpBlock = (@(
 ) -join "`n")
 $nextPatch = ($patchText.TrimEnd() + "`n`n" + $managedBlock + "`n" + $mcpBlock + "`n")
 $stage = Join-Path $profileDir ".cordis.patch.stage"
-Set-Content -LiteralPath $stage -Value $nextPatch -Encoding UTF8 -NoNewline
+Set-Utf8NoBom $stage $nextPatch
 Move-Item -LiteralPath $stage -Destination $patchPath -Force
 
 # --- 6. install plugin package ----------------------------------------------
@@ -145,13 +168,16 @@ Copy-Item -LiteralPath $pluginSource -Destination $pluginTarget -Recurse
 New-Item -ItemType Directory -Path (Join-Path $DataDir "plugin-secrets") -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $DataDir "installations") -Force | Out-Null
 # Match the Controller's canonical target key: sha256(stableStringify({dshHome, profile})).
-$targetKey = Get-Sha256 ((@{ dshHome = (Resolve-Path -LiteralPath $DshHome).Path.ToLower(); profile = $ProfileName } | ConvertTo-Json -Compress))
+# Use an ordered hashtable: ConvertTo-Json serializes [ordered]@{} in declaration
+# order, which matches the Controller's sorted-key stableStringify for this
+# two-key object on every PowerShell version.
+$targetKey = Get-Sha256 (([ordered]@{ dshHome = (Resolve-Path -LiteralPath $DshHome).Path.ToLower(); profile = $ProfileName } | ConvertTo-Json -Compress))
 $secretHash = Get-Sha256 $secret
 $managedHash = Get-Sha256 $managedBlock
 @{ targetKey = $targetKey; secret = $secret; secretHash = $secretHash; createdAt = (Get-Date).ToUniversalTime().ToString("o") } |
-  ConvertTo-Json | Set-Content -LiteralPath $secretRecordPath -Encoding UTF8
+  ConvertTo-Json | Set-Utf8NoBom $secretRecordPath
 @{ targetKey = $targetKey; profile = $ProfileName; themePath = $themeFile; assetDir = $assetDir; managedBlockHash = $managedHash; installedAt = (Get-Date).ToUniversalTime().ToString("o") } |
-  ConvertTo-Json | Set-Content -LiteralPath (Join-Path $DataDir "installations\$ProfileName.json") -Encoding UTF8
+  ConvertTo-Json | Set-Utf8NoBom (Join-Path $DataDir "installations\$ProfileName.json")
 
 # --- 8. start Studio (Controller) -------------------------------------------
 $studioState = "not-started"
@@ -165,6 +191,7 @@ if (-not $SkipStudio) {
     $controllerErr = Join-Path $env:TEMP "dsh-skin-controller.err.log"
     $env:DSH_SKIN_PORT = "$ControllerPort"
     $env:DSH_SKIN_DATA_DIR = $DataDir
+    $env:DSH_HOME = $DshHome
     Start-Process -FilePath $nodePath -ArgumentList @($controllerEntry) `
       -WorkingDirectory $runtime -WindowStyle Hidden -RedirectStandardOutput $controllerLog -RedirectStandardError $controllerErr | Out-Null
     $deadline = (Get-Date).AddSeconds(20)
@@ -187,7 +214,7 @@ if (-not $SkipCodexMcp) {
     Copy-Item -LiteralPath $skillRoot -Destination $codexSkillTarget -Recurse
     & $codex.Source mcp get deepseek-harness-skin-studio *> $null
     if ($LASTEXITCODE -ne 0) {
-      & $codex.Source mcp add deepseek-harness-skin-studio --env "DSH_SKIN_CONTROLLER_ENTRY=$controllerEntry" --env "DSH_SKIN_PLUGIN_SOURCE=$pluginSource" -- $nodePath $mcpEntry
+      & $codex.Source mcp add deepseek-harness-skin-studio --env "DSH_SKIN_CONTROLLER_ENTRY=$controllerEntry" --env "DSH_SKIN_PLUGIN_SOURCE=$pluginSource" --env "DSH_SKIN_URL=$controllerUrl" --env "DSH_SKIN_DATA_DIR=$DataDir" -- $nodePath $mcpEntry
       if ($LASTEXITCODE -eq 0) { $codexState = "registered" } else { $codexState = "codex-mcp-add-failed" }
     } else { $codexState = "already-registered" }
   }

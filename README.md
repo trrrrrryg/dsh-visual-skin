@@ -83,8 +83,11 @@ agent 会按上述流程完成安装（它也可以直接运行 `install.ps1`）
 ### 验证安装
 
 ```powershell
-# Controller 健康检查（应返回 ok）
-Invoke-RestMethod http://127.0.0.1:11862/dsh-skin/health
+# 插件健康检查（在 DSH 端口上，应返回 ok:true；默认 DSH 端口 10402）
+Invoke-RestMethod http://127.0.0.1:10402/dsh-skin/health
+
+# Controller / Studio 状态检查（应返回 ok:true、capabilities.compatible:true）
+Invoke-RestMethod http://127.0.0.1:11862/api/v1/status
 ```
 
 - Studio 打开：`http://127.0.0.1:11862`（或点开始菜单/托盘图标）
