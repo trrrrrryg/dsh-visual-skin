@@ -1,5 +1,11 @@
 # Change notes
 
+## 2026-08-18 — DSH settings card opens Studio in a new tab only (no hijack)
+
+- **Root cause**: the settings card used `window.open("/dsh-skin/studio", "_blank", "noopener,noreferrer")` with a `window.location.assign("/dsh-skin/studio")` fallback. When the popup was blocked (or returned null), the fallback navigated the live DSH tab itself to Studio, producing two Studio tabs.
+- **Fix**: the card now renders a native `<a href="/dsh-skin/studio" target="_blank" rel="noopener noreferrer">` — a user-gesture anchor can never navigate the current tab, so the DSH page stays put and exactly one Studio tab opens.
+- Verified in real Chromium: DSH tab URL unchanged after click; one new tab at the Controller URL.
+
 ## 2026-08-18 — Studio: instant preview switching between skins (no refresh)
 
 - **Root cause**: switching designs killed the previous warm runner and cold-provisioned a new isolated DSH; the old verified frame stayed on a dead URL while the new session waited for a render receipt that never came — the candidate (warming) frame was styled `1px × 1px + clip-path: inset(50%)`, which collapses its layout to zero width, so the isolated DSH client could not discover its regional surfaces and never posted the rendered receipt. The session stayed `awaiting-render` forever and only a full page refresh (which re-runs bootstrap and points the main frame at the new session) made the skin appear.

@@ -1382,18 +1382,18 @@ function installSkinSettingsCard(ctx: ClientContextLike): void {
     return;
   }
   const card = (_props: unknown): unknown => {
-    const openStudio = () => {
-      const opened = window.open("/dsh-skin/studio", "_blank", "noopener,noreferrer");
-      if (!opened) window.location.assign("/dsh-skin/studio");
-    };
+    // Open Studio in a brand-new tab with a native anchor. A window.open +
+    // location.assign fallback could navigate the live DSH page itself to
+    // Studio when the popup is blocked (two Studio tabs); a plain
+    // target="_blank" link can never hijack the current tab.
+    const openStudioStyle = { marginTop: "14px", border: "0", borderRadius: "8px", padding: "7px 14px", display: "inline-block", color: "var(--dsw-alias-bg-layer-3)", background: "var(--dsw-alias-label-primary)", font: "inherit", cursor: "pointer", textDecoration: "none" };
     const cardStyle = { border: "1px solid var(--dsw-alias-border-l2)", background: "var(--dsw-alias-bg-layer-3)", borderRadius: "12px", listStyle: "none", padding: "16px" };
     const titleStyle = { color: "var(--dsw-alias-label-primary)", fontSize: "15px", fontWeight: 600, lineHeight: 1.4 };
     const descriptionStyle = { color: "var(--dsw-alias-label-tertiary)", fontSize: "13px", lineHeight: 1.5, marginTop: "4px" };
-    const buttonStyle = { marginTop: "14px", border: "0", borderRadius: "8px", padding: "7px 14px", color: "var(--dsw-alias-bg-layer-3)", background: "var(--dsw-alias-label-primary)", font: "inherit", cursor: "pointer" };
     return jsx.jsxs("li", { style: cardStyle, "data-dsh-skin-settings-card": "1", children: [
       jsx.jsx("div", { style: titleStyle, children: "皮肤设置" }),
       jsx.jsx("div", { style: descriptionStyle, children: "打开本地 Skin Studio，实时设计并预览 DSH 皮肤。" }),
-      jsx.jsx("button", { type: "button", style: buttonStyle, onClick: openStudio, children: "启动并打开 Skin Studio" })
+      jsx.jsx("a", { href: "/dsh-skin/studio", target: "_blank", rel: "noopener noreferrer", style: openStudioStyle, children: "启动并打开 Skin Studio" })
     ] });
   };
   slots.inject("settings.plugin.item", () => slots.register({ name: "settings.plugin.item", id: "dsh-skin-studio", order: 30, label: "皮肤设置", registrant: "@dsh-skin/dsh-plugin" }, card));
