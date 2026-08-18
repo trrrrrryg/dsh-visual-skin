@@ -8,7 +8,15 @@ const stateLabel: Record<PreviewState, string> = { staging: "连接温预览", l
 export function PreviewWorkbench({ design, preview, verifiedSession, candidateSession, selectedRegion, assetUrls, onPreview, onRegionSelect, onLinkedChange, onDividerChange }: Props) {
   const [viewport, setViewport] = useState("auto"); const [frameLoaded, setFrameLoaded] = useState(false); const [frameHover, setFrameHover] = useState(false); const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
   const stageRef = useRef<HTMLDivElement>(null); const frameRef = useRef<HTMLIFrameElement>(null);
-  const visibleSession = verifiedSession?.previewUrl ? verifiedSession : candidateSession?.previewUrl ? candidateSession : null;
+  const visibleSession = useMemo(() => {
+    // Switching designs kills the previous warm runner, so its verified frame
+    // is a dead URL. Point the main frame at the new session's URL as soon as
+    // it exists (and show the loading placeholder before that), instead of
+    // keeping a dead frame on screen until the new session reaches live.
+    const switchedDesign = Boolean(candidateSession && verifiedSession && candidateSession.designId !== verifiedSession.designId);
+    if (switchedDesign) return candidateSession?.previewUrl ? candidateSession : null;
+    return verifiedSession?.previewUrl ? verifiedSession : candidateSession?.previewUrl ? candidateSession : null;
+  }, [candidateSession, verifiedSession]);
   const visibleUrl = visibleSession?.previewUrl ?? null;
   const linked = design?.theme.appearance.regions.linked ?? true;
   const divider = design?.theme.appearance.regions.divider ?? false;
