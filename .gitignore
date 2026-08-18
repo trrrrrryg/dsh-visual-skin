@@ -1,0 +1,32 @@
+# dependencies & build output
+node_modules/
+dist/
+*.tsbuildinfo
+
+# portable runtime (51MB build artifact, rebuilt by install.ps1)
+agents/**/runtime/
+
+# QA / rendering intermediate artifacts
+.docx-qa*/
+docx/_rendered*/
+~$*
+
+# python doc toolchain (kept local; only final .docx ships)
+build_project_docs.py
+scripts/
+__pycache__/
+*.pyc
+
+# local scratch & logs
+.tmp/
+*.log
+playwright-report/
+test-results/
+
+# stray local assets
+wallpaper.jpg
+cleanup-manifest-*.txt
+
+# OS
+.DS_Store
+Thumbs.db

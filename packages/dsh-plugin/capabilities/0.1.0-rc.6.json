@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "dshVersion": "0.1.0-rc.6",
+  "observedAt": "2026-08-17",
+  "source": {
+    "packageRoot": "%DSH_HOME%/profiles/node_modules/@deepseek-ai",
+    "themeClientSha256": "240449265BBC8C8FE701C4B8722CDAB0413FF688A3CD6D3DD4169CCDE8F319C3",
+    "cordisClientRunnerSha256": "62A2A1DF1EEB7D1F71F33D8BD4CC1E50E81A16A40B64D5CD6F794C55CC057C40"
+  },
+  "themeRuntime": {
+    "service": "theme",
+    "methods": ["getTheme", "exportInspectTokens", "setTheme", "register", "overrideTokens"],
+    "event": "theme/change",
+    "overrideShape": "Record<token,{light:string,dark:string}>"
+  },
+  "inspect": {
+    "provider": "Theme",
+    "method": "listTokens",
+    "manifestObservedIn": "@deepseek-ai/dsh-cordis-client-runner/lib/client.js",
+    "publicHttpEndpoint": null,
+    "runtimeQueryAvailableToController": false,
+    "reason": "The provider is transported through authenticated Cordis agent inspection, not a stable public loopback HTTP API. Static capability is pinned; runtime apply remains fail-closed on version mismatch."
+  },
+  "webServer": {
+    "service": "webServer",
+    "registration": "register({kind,path,handler})"
+  },
+  "regionalPreview": {
+    "contract": "v2-region-surfaces",
+    "sidebarSelector": "div.pI_x6G_sidebarCol",
+    "mainSelector": "unique div.wSkVaW_heroWorkspaceRow, then its first split-layout ancestor branch whose parent contains the unique sidebar selector",
+    "sidebarOccluderSelector": "unique :scope > div > div.hHd-Xa_root.hHd-Xa_quietBars inside the unique sidebar column",
+    "sidebarFadeSelector": "optional unique .qDHVXG_fade inside the unique sidebar column; it is mounted only when the rc.6 workspace-list scroll body exists",
+    "linkedCanvas": "the parent of that derived main branch is the capability-pinned common split-layout root. In linked mode exactly one backdrop layer is mounted there; the sidebar/main native backgrounds, opaque sidebar content root, and the native workspace-list bottom fade are made transparent, and the sidebar's split-only right border is suppressed. The layer uses the root's live bounds so image cover/position remains continuous after resize. An optional managed one-pixel divider may be overlaid without splitting that canvas.",
+    "splitBoundary": "in independent-region mode the plugin either renders the managed divider or a bounded opaque cross-fade at the same measured sidebar edge. The cross-fade exactly matches each structured colour edge, contains no blur or alpha glow, and accepts no CSS input.",
+    "evidence": "Observed in Controller-provisioned DeepSeek Harness 0.1.0-rc.6 Chromium preview on 2026-08-18; semantic aside/main selectors returned no matches. The inner hHd-Xa sidebar root had opaque rgb(27,27,28) background, qDHVXG_fade was the native 24px bottom sidebar-fill gradient, and the sidebar had a 1px split border.",
+    "uniqueness": "sidebar, workspace anchor, and inner sidebar occluder each resolve exactly one HTMLElement; the optional native sidebar fade resolves zero or one HTMLElement, and more than one is rejected. The derived main branch must have non-zero bounds and be outside sidebar. Otherwise the plugin fails closed and does not acknowledge rendering.",
+    "embeddedBridge": "loopback parent only; events contain preview session and generation and never carry controller credentials"
+  },
+  "balanceApi": {
+    "contract": "GET /dsh-skin/balance (loopback-only) proxies the DeepSeek /user/balance endpoint; the API key resolves from DSH_SKIN_BALANCE_API_KEY, then DEEPSEEK_API_KEY, then %DSH_HOME%/.credentials.yaml and never leaves the Host; responses are cached for 30s and refresh=1 bypasses the cache",
+    "clientSurface": "a composer chip [data-dsh-skin-balance] that mounts on div.FJxK0a_root (conversation.composer.dock) in conversation views and on div.uV2eYG_trailing on the hero, persists its value in localStorage (dsh-skin-balance:v1), and re-queries on click/Enter/Space. The dock re-renders per turn, so the chip is re-appended on every dock replacement.",
+    "evidence": "Dock observed in the live rc.6 conversation view on 2026-08-18: <div data-slot=\"conversation.composer.dock\"><div class=\"FJxK0a_root\"><span>5 轮 · 114 步</span> ... <span>输入 18.4M tok · 输出 130K tok</span></div></div>"
+  },
+  "persistentBase": {
+    "contract": "webServer.tapIndex injects a <style id=\"dsh-skin-persistent\"> into every served index.html: html body / html body[data-ds-dark-theme] token overrides, the linked backdrop painted directly on the body background when blur is 0 and opacity is 1 (html body{background-image…;background-attachment:fixed}) — the most stable layer, which cannot disappear during route transitions — or an html body::before pseudo canvas for blurred/partial-opacity themes, per-panel transparency for .pI_x6G_sidebarCol/.pI_x6G_frame/.pI_x6G_centerCol and the sidebar-scoped .hHd-Xa_root (also position:relative;z-index:1), the .qDHVXG_fade, and the sidebar divider as a persistent .pI_x6G_sidebarCol::after gradient+glow pseudo-element. The conversation mask is default-on for the main region and off only on the hero. Split mode pins region backgrounds on .pI_x6G_sidebarCol/.pI_x6G_centerCol instead.",
+    "evidence": "Generated style is idempotent and capped at 64 KiB; first-paint availability is guaranteed by a synchronous theme-file fallback in the index transform. The zero-blur linked case paints on the body background, so a route transition (or a transform/filter on a container) can never detach or hide it."
+  }
+}

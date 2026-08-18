@@ -1,0 +1,8 @@
+interface:
+  display_name: "DeepSeek Harness Skin Studio"
+  short_description: "Design, preview, and safely apply DSH skins"
+  default_prompt: "Use $deepseek-harness-skin-studio to open the local skin Studio, co-design a structured theme, preview it, and apply only after I confirm in the web UI."
+  brand_color: "#B85C3B"
+
+policy:
+  allow_implicit_invocation: true

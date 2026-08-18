@@ -1,0 +1,12 @@
+{
+  "name": "@dsh-skin/portable-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@dsh-skin/agent-cli": "workspace:*",
+    "@dsh-skin/controller": "workspace:*",
+    "@dsh-skin/mcp-server": "workspace:*",
+    "@dsh-skin/studio": "workspace:*"
+  }
+}

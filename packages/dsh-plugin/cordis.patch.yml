@@ -1,0 +1,9 @@
+- insert:
+    - id: dsh-skin-studio
+      name: '@dsh-skin/dsh-plugin'
+      config:
+        profile: !!js process.env.DSH_SKIN_PROFILE
+        themeFile: !!js process.env.DSH_SKIN_THEME_FILE
+        assetDir: !!js process.env.DSH_SKIN_ASSET_DIR
+        controllerUrl: !!js process.env.DSH_SKIN_CONTROLLER_URL
+        pluginSecret: !!js process.env.DSH_SKIN_PLUGIN_SECRET

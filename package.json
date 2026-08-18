@@ -1,0 +1,25 @@
+{
+  "name": "deepseek-harness-skin-studio",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.19.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "pnpm -r --if-present build",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "test": "pnpm build && node --test --test-concurrency=1 tests/*.test.mjs",
+    "dev": "pnpm --filter @dsh-skin/controller dev",
+    "controller": "pnpm --filter @dsh-skin/controller start",
+    "mcp": "pnpm --filter @dsh-skin/mcp-server start",
+    "skin": "pnpm --filter @dsh-skin/agent-cli start"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh": "0.1.0-rc.6",
+    "@types/node": "24.3.0",
+    "playwright-core": "1.62.1",
+    "tsx": "4.20.5",
+    "typescript": "5.9.2"
+  }
+}
