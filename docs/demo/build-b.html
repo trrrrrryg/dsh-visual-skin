@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>dsh-visual-skin · 一张图，长成一套皮肤</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 100%; height: 100%; background: #e8e4da; overflow: hidden; }
+  #stage { position: fixed; inset: 0; display: grid; place-items: center; }
+  #canvas { position: relative; width: 1920px; height: 1080px; background: #f3f1ec; overflow: hidden; }
+  .layer { position: absolute; inset: 0; pointer-events: none; }
+  .eyebrow { position: absolute; left: 80px; top: 96px; font: 700 18px/1 "Cascadia Code", Consolas, monospace; letter-spacing: .16em; color: #b84e2c; opacity: 0; }
+  .claim { position: absolute; left: 80px; top: 150px; font-family: "Segoe UI Variable", "Microsoft YaHei UI", sans-serif; font-weight: 800; font-size: 96px; color: #1d201f; line-height: 1.05; opacity: 0; }
+  .claim em { font-style: normal; color: #b84e2c; }
+  .claim .sub { margin-top: 26px; font: 500 22px/1.5 "Cascadia Code", Consolas, monospace; letter-spacing: .06em; color: #626861; font-size: 20px; }
+  /* 左侧图 → 右侧 UI 生成 */
+  .img-src { position: absolute; left: 90px; top: 480px; width: 300px; height: 180px; border-radius: 14px;
+    background: linear-gradient(135deg, #7c4a2a, #e5764d 55%, #f0a642); box-shadow: 0 24px 48px -18px rgba(184,78,44,.55);
+    opacity: 0; transform: rotate(-3deg); }
+  .img-src::after { content: "背景图 · 内容寻址 sha256"; position: absolute; left: 0; right: 0; bottom: -34px; text-align: center; font: 500 13px/1 "Cascadia Code", Consolas, monospace; color: #a79f92; }
+  .arrow { position: absolute; left: 430px; top: 546px; font-size: 40px; color: #b84e2c; opacity: 0; }
+  /* 右侧卡片（斜置） */
+  .card-wrap { position: absolute; left: 560px; top: 180px; width: 1250px; height: 760px; perspective: 1500px; opacity: 0; }
+  .card { position: absolute; inset: 0; border-radius: 18px; background: #fff; border: 1px solid #d6d0c5;
+    box-shadow: 0 40px 80px -35px rgba(31,29,25,.4); transform: rotateY(-12deg) rotateX(3deg); overflow: hidden; }
+  .card .skel { position: absolute; inset: 0; padding: 26px; display: flex; flex-direction: column; gap: 14px; }
+  .sk { height: 16px; border-radius: 8px; background: #e9e4da; }
+  .sk.w40 { width: 40%; } .sk.w70 { width: 70%; } .sk.w90 { width: 90%; } .sk.w55 { width: 55%; } .sk.w30 { width: 30%; }
+  .sk.row { height: 120px; border-radius: 12px; background: linear-gradient(135deg, #efe9df, #e4ddcf); }
+  /* 生成的 Studio 界面（盖在骨架之上） */
+  .ui { position: absolute; inset: 0; background: #f3f1ec; opacity: 0; }
+  .ui .bar { height: 46px; display: flex; align-items: center; gap: 12px; padding: 0 16px; background: #fcfbf8; border-bottom: 1px solid #d6d0c5; }
+  .ui .bar .mk { width: 26px; height: 26px; border-radius: 6px; background: #1d201f; color: #fcfbf8; display: grid; place-items: center; font: 700 10px/1 "Cascadia Code", Consolas, monospace; }
+  .ui .bar .tt { font-size: 12px; font-weight: 600; color: #1d201f; }
+  .ui .bar .go { margin-left: auto; padding: 5px 14px; border-radius: 8px; background: #b84e2c; color: #fff; font-size: 11px; font-weight: 600; }
+  .ui .body { display: grid; grid-template-columns: 260px 1fr; height: calc(100% - 46px); }
+  .ui .rail { border-right: 1px solid #d6d0c5; background: #fcfbf8; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+  .ui .rail .c { border: 1px solid #d6d0c5; border-radius: 9px; background: #fff; padding: 9px; }
+  .ui .rail .c .th { height: 46px; border-radius: 6px; background: linear-gradient(135deg, #7c4a2a, #e5764d 60%, #f0a642); }
+  .ui .rail .c .nm { margin-top: 6px; font-size: 10.5px; color: #1d201f; font-weight: 600; }
+  .ui .preview { background: #151716; position: relative; display: grid; place-items: center; }
+  .ui .preview .fr { width: 86%; height: 82%; border-radius: 10px; border: 1px solid #39413c; background: #242825; position: relative; overflow: hidden; }
+  .ui .preview .fr::before { content: ""; position: absolute; inset: 0; background:
+    radial-gradient(700px 400px at 30% 20%, rgba(230,118,77,.32), transparent 60%),
+    radial-gradient(560px 380px at 78% 74%, rgba(64,184,170,.3), transparent 52%),
+    linear-gradient(160deg, #2a2e2b, #1c1f1d 70%); }
+  .ui .preview .fr .sd { position: absolute; left: 0; top: 0; bottom: 0; width: 150px; background: rgba(18,20,19,.55); border-right: 1px solid rgba(255,255,255,.08); }
+  .ui .preview .fr .mb { position: absolute; left: 0; right: 0; bottom: 0; height: 60px; background: rgba(18,20,19,.6); border-top: 1px solid rgba(255,255,255,.07); }
+  /* 底部分步 */
+  .steps { position: absolute; left: 80px; bottom: 90px; display: flex; align-items: center; gap: 16px; opacity: 0; }
+  .steps .s { padding: 12px 22px; border-radius: 99px; background: #fff; border: 1px solid #d6d0c5; font-size: 17px; font-weight: 600; color: #1d201f; display: flex; align-items: center; gap: 10px; }
+  .steps .s i { width: 22px; height: 22px; border-radius: 50%; background: #b84e2c; color: #fff; display: grid; place-items: center; font: 700 11px/1 "Cascadia Code", Consolas, monospace; }
+  .steps .s.on { background: #1d201f; color: #f3f1ec; }
+  .steps .arr { color: #a79f92; font-size: 22px; }
+  .endmark { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%); text-align: center; opacity: 0; }
+  .endmark .b { font-family: "Segoe UI Variable", "Microsoft YaHei UI", sans-serif; font-weight: 800; font-size: 84px; color: #1d201f; }
+  .endmark .b em { font-style: normal; color: #b84e2c; }
+  .endmark .s2 { margin-top: 20px; font: 500 20px/1 "Cascadia Code", Consolas, monospace; letter-spacing: .2em; color: #626861; }
+  .no-record { position: fixed; right: 14px; bottom: 12px; z-index: 99; color: rgba(29,32,31,.3); font: 500 11px/1 "Cascadia Code", Consolas, monospace; }
+</style>
+</head>
+<body>
+<div id="stage"><div id="canvas">
+  <div class="eyebrow" id="eyebrow">IMAGE → SKIN → DSH</div>
+  <div class="claim" id="claim">一张图，<em>长成</em>一套皮肤<div class="sub">可视化设计 · 隔离预览 · 一键写入</div></div>
+  <div class="img-src" id="imgSrc"></div>
+  <div class="arrow" id="arrow">→</div>
+  <div class="card-wrap" id="cardWrap">
+    <div class="card">
+      <div class="skel">
+        <div class="sk w40"></div><div class="sk w70"></div>
+        <div class="sk row"></div><div class="sk w90"></div><div class="sk w55"></div><div class="sk w30"></div>
+      </div>
+      <div class="ui">
+        <div class="bar"><div class="mk">DS</div><div class="tt">DeepSeek Harness Skin Studio</div><div class="go">写入我的 DSH</div></div>
+        <div class="body">
+          <div class="rail">
+            <div class="c"><div class="th"></div><div class="nm">秋暮错暑</div></div>
+            <div class="c"><div class="th" style="background:linear-gradient(135deg,#1d4e46,#40b8aa)"></div><div class="nm">MCP 背景替换</div></div>
+            <div class="c"><div class="th" style="background:linear-gradient(135deg,#4a2c6b,#8b6bb8)"></div><div class="nm">数字装帧</div></div>
+          </div>
+          <div class="preview"><div class="fr"><div class="sd"></div><div class="mb"></div></div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="steps" id="steps">
+    <div class="s" data-i="0"><i>1</i>上传图片</div><span class="arr">→</span>
+    <div class="s" data-i="1"><i>2</i>区域设计</div><span class="arr">→</span>
+    <div class="s" data-i="2"><i>3</i>隔离预览</div><span class="arr">→</span>
+    <div class="s" data-i="3"><i>4</i>确认写入</div>
+  </div>
+  <div class="endmark" id="endmark"><div class="b">dsh-<em>visual-skin</em></div><div class="s2">一张图，长成一套皮肤</div></div>
+</div></div>
+<div class="no-record">dsh-visual-skin demo · 7s</div>
+<script>
+(function () {
+  "use strict";
+  var els = {
+    eyebrow: document.getElementById("eyebrow"), claim: document.getElementById("claim"),
+    imgSrc: document.getElementById("imgSrc"), arrow: document.getElementById("arrow"),
+    cardWrap: document.getElementById("cardWrap"), steps: document.getElementById("steps"),
+    endmark: document.getElementById("endmark"),
+    ui: document.querySelector(".ui"), skels: [].slice.call(document.querySelectorAll(".sk"))
+  };
+  var DURATION = 7;
+  function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+  function easeOutExpo(t) { return t >= 1 ? 1 : 1 - Math.pow(2, -10 * t); }
+  function easeInOut(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
+  function overshoot(t) { var c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2); }
+  function seg(t, a, b) { return clamp01((t - a) / (b - a)); }
+  function setOp(el, v) { el.style.opacity = v.toFixed(3); }
+
+  function render(t) {
+    // 0-1.2s：eyebrow + claim
+    setOp(els.eyebrow, easeOutExpo(seg(t, 0.1, 0.6)));
+    var claimIn = easeOutExpo(seg(t, 0.3, 0.95));
+    setOp(els.claim, claimIn);
+    els.claim.style.transform = "translateY(" + (16 - 16 * claimIn).toFixed(1) + "px)";
+    // 1.0-1.8s：图片登场
+    var imgIn = overshoot(seg(t, 1.0, 1.6));
+    setOp(els.imgSrc, imgIn > 0 ? Math.min(1, imgIn * 1.3) : 0);
+    els.imgSrc.style.transform = "rotate(-3deg) translateY(" + (30 - 30 * imgIn).toFixed(1) + "px)";
+    // 1.5-2.0s：箭头
+    setOp(els.arrow, easeOutExpo(seg(t, 1.5, 1.95)));
+    // 1.8-2.8s：卡片骨架登场（斜置 + 过冲）
+    var cardIn = overshoot(seg(t, 1.8, 2.6));
+    setOp(els.cardWrap, cardIn > 0 ? Math.min(1, cardIn * 1.35) : 0);
+    els.cardWrap.style.transform = "translateX(" + (60 - 60 * cardIn).toFixed(1) + "px)";
+    // 骨架行错峰显影（2.4-3.6s）
+    els.skels.forEach(function (sk, i) {
+      setOp(sk, easeOutExpo(seg(t, 2.4 + i * 0.12, 3.0 + i * 0.12)));
+    });
+    // 2.9-3.6s：真实 UI 覆盖骨架（换真一拍）
+    var uiIn = easeInOut(seg(t, 2.9, 3.6));
+    setOp(els.ui, uiIn);
+    // 3.2-4.4s：底部分步点亮
+    var stepsIn = easeOutExpo(seg(t, 3.2, 3.8));
+    setOp(els.steps, stepsIn);
+    var stepEls = [].slice.call(document.querySelectorAll(".steps .s"));
+    stepEls.forEach(function (s, i) {
+      var on = seg(t, 3.6 + i * 0.5, 4.0 + i * 0.5);
+      s.classList.toggle("on", on > 0.4);
+    });
+    // 5.2-6.0s：谢幕
+    var out = seg(t, 5.2, 5.8);
+    setOp(els.claim, claimIn * (1 - out));
+    setOp(els.imgSrc, (imgIn > 0 ? Math.min(1, imgIn * 1.3) : 0) * (1 - out));
+    setOp(els.arrow, easeOutExpo(seg(t, 1.5, 1.95)) * (1 - out));
+    setOp(els.cardWrap, (cardIn > 0 ? Math.min(1, cardIn * 1.35) : 0) * (1 - out));
+    setOp(els.steps, stepsIn * (1 - out));
+    // 5.6-7.0s：endmark
+    var endIn = easeOutExpo(seg(t, 5.6, 6.4));
+    setOp(els.endmark, endIn);
+    els.endmark.style.transform = "translate(-50%,-50%) scale(" + (0.94 + 0.06 * endIn).toFixed(3) + ")";
+  }
+
+  window.__ready = true;
+  var playing = true;
+  var rafId = null;
+  window.__seek = function (t) {
+    playing = false;
+    if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
+    render(Math.max(0, Math.min(DURATION - 0.001, t)));
+  };
+  if (!(window.__recording || window.__seekRender)) {
+    var start = performance.now();
+    function tick(now) {
+      if (!playing) return;
+      var t = (now - start) / 1000;
+      render(t >= DURATION ? DURATION - 0.001 : t);
+      if (t < DURATION) rafId = requestAnimationFrame(tick);
+    }
+    rafId = requestAnimationFrame(tick);
+  }
+})();
+</script>
+</body>
+</html>

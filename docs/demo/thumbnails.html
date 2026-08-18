@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>灰盒验证 · 分镜关键帧</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #1c1f1d; font-family: "Segoe UI Variable", "Microsoft YaHei UI", sans-serif; }
+  .frame { width: 1920px; height: 1080px; position: relative; background: #171a18; overflow: hidden; }
+  .frame + .frame { border-top: 2px solid #39413c; }
+  .flabel { position: absolute; top: 20px; left: 24px; z-index: 9; padding: 6px 14px; border-radius: 6px; background: rgba(255,255,255,.08); color: #f3f1ea; font: 700 15px/1 "Cascadia Code", Consolas, monospace; letter-spacing: .1em; }
+  .box { position: absolute; display: grid; place-items: center; border-radius: 12px; font-weight: 700; font-size: 22px; }
+  .box small { display: block; margin-top: 6px; font: 500 13px/1 "Cascadia Code", Consolas, monospace; opacity: .65; }
+  .t { position: absolute; z-index: 8; color: #f3f1ea; font-weight: 800; text-align: center; }
+  .t small { display: block; margin-top: 10px; font: 500 14px/1 "Cascadia Code", Consolas, monospace; opacity: .55; font-weight: 400; }
+  .line { position: absolute; z-index: 7; border-left: 3px dashed #40b8aa; }
+  .dot { position: absolute; width: 18px; height: 18px; border-radius: 50%; background: #f3f1ea; z-index: 7; }
+  /* 帧 1 */
+  #f1 .word { left: 50%; top: 42%; transform: translate(-50%,-50%); font-size: 58px; letter-spacing: .02em; }
+  #f1 .word small { font-size: 18px; }
+  /* 帧 2 */
+  #f2 .card { left: 19%; top: 26%; width: 62%; height: 56%; background: #2b2f2c; border: 1px solid #4a524d; }
+  #f2 .card small { opacity: .7; }
+  #f2 .halo { left: 22%; top: 12%; width: 56%; height: 42%; background: #33231a; border-radius: 50%; filter: blur(30px); }
+  #f2 .t2 { left: 50%; top: 12%; transform: translateX(-50%); font-size: 46px; width: 80%; }
+  #f2 .beam { left: 30%; top: -10%; width: 200px; height: 90%; background: linear-gradient(180deg, rgba(255,240,215,.35), transparent 80%); transform: rotate(10deg); filter: blur(4px); }
+  /* 帧 3 */
+  #f3 .work { left: 8%; top: 20%; width: 84%; height: 62%; background: #262a27; border: 1px solid #4a524d; }
+  #f3 .dsh { left: 24%; top: 30%; width: 52%; height: 44%; background: #1d201f; border: 1px solid #55605a; }
+  #f3 .dsh small { font-size: 14px; }
+  #f3 .line3 { left: 78%; top: 34%; height: 120px; }
+  #f3 .note { left: 81%; top: 38%; width: 15%; color: #40b8aa; font-size: 17px; text-align: left; }
+  /* 帧 4 */
+  #f4 .rail { left: 8%; top: 22%; width: 22%; height: 58%; background: #262a27; border: 1px solid #4a524d; display: flex; flex-direction: column; gap: 14px; padding: 16px; }
+  #f4 .thumb { width: 100%; height: 78px; border-radius: 8px; background: #3a403c; }
+  #f4 .thumb.on { background: #4a3020; outline: 3px solid #e5764d; }
+  #f4 .prev { left: 36%; top: 22%; width: 56%; height: 58%; background: #1d201f; border: 1px solid #4a524d; }
+  #f4 .cur { left: 30%; top: 56%; }
+  /* 帧 5 */
+  #f5 .prev2 { left: 6%; top: 18%; width: 88%; height: 66%; background: #1d201f; border: 1px solid #4a524d; }
+  #f5 .btn { left: 76%; top: 74%; width: 12%; height: 52px; background: #087e72; border-radius: 10px; }
+  #f5 .btn small { font-size: 13px; color: #fff; }
+  #f5 .cur2 { left: 80%; top: 70%; }
+  /* 帧 6 */
+  #f6 .card6 { left: 25%; top: 30%; width: 50%; height: 46%; background: #2b2f2c; border: 1px solid #4a524d; }
+  #f6 .word6 { left: 50%; top: 16%; transform: translateX(-50%); font-size: 52px; }
+  #f6 .word6 small { font-size: 17px; }
+</style>
+</head>
+<body>
+
+<section id="f1" class="frame">
+  <div class="flabel">F1 · 0.5s · 字标定场</div>
+  <div class="box" style="left:50%;top:50%;width:40%;height:26%;transform:translate(-50%,-50%);background:#22262var(--x,3);">
+    <div class="t word">dsh-visual-skin<small>一件皮肤，值得被看见</small></div>
+  </div>
+</section>
+
+<section id="f2" class="frame">
+  <div class="flabel">F2 · 3.2s · 展品登场</div>
+  <div class="halo"></div>
+  <div class="beam"></div>
+  <div class="box card">Studio 工作台<small>rotY -8° · 悬停</small></div>
+  <div class="t t2">一件皮肤，值得被看见</div>
+</section>
+
+<section id="f3" class="frame">
+  <div class="flabel">F3 · 5.4s · 隔离预览特写</div>
+  <div class="box work">预览工作台</div>
+  <div class="box dsh">隔离 DSH 帧<small>深色 UI 剪影</small></div>
+  <div class="line line3"></div>
+  <div class="note">隔离预览 · 不碰你的 DSH</div>
+</section>
+
+<section id="f4" class="frame">
+  <div class="flabel">F4 · 7.0s · 主题切换</div>
+  <div class="rail">
+    <div class="thumb"></div><div class="thumb on"></div><div class="thumb"></div>
+  </div>
+  <div class="box prev">预览区</div>
+  <div class="dot cur"></div>
+</section>
+
+<section id="f5" class="frame">
+  <div class="flabel">F5 · 8.8s · 写入按钮</div>
+  <div class="box prev2">预览区</div>
+  <div class="box btn">写入我的 DSH</div>
+  <div class="dot cur2"></div>
+</section>
+
+<section id="f6" class="frame">
+  <div class="flabel">F6 · 11.5s · 谢幕</div>
+  <div class="box card6">Studio 工作台</div>
+  <div class="t word6">dsh-visual-skin<small>一件皮肤，值得被看见</small></div>
+</section>
+
+</body>
+</html>

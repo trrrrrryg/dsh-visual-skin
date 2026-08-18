@@ -21,6 +21,17 @@
 
 ---
 
+## 🎬 演示
+
+| Hero · 暗场陈列（12s） | 生成 · 从图到皮肤（7s） |
+|---|---|
+| ![一件皮肤，值得被看见](docs/demo/out/hero-a-960.gif) | ![一张图，长成一套皮肤](docs/demo/out/build-b-960.gif) |
+| [▶ 下载 MP4](docs/demo/out/hero-a-30fps.mp4) · [打开动画 HTML](docs/demo/hero-a.html) | [▶ 下载 MP4](docs/demo/out/build-b-30fps.mp4) · [打开动画 HTML](docs/demo/build-b.html) |
+
+> 动画由 [huashu-design](https://github.com/alchaincyf/huashu-design) 制作 · 分镜卡见 [docs/demo/storyboard.md](docs/demo/storyboard.md) · 方向板见 [docs/demo/direction-boards.html](docs/demo/direction-boards.html)
+
+---
+
 ## 📦 安装
 
 ### 前置要求
