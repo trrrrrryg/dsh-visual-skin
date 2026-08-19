@@ -11,7 +11,7 @@ interface ThemeDocument { designId: string; revision: number; hash: string; them
 interface PreviewSession extends ThemeDocument { expiresAt: string; sessionId?: string; generation?: number }
 interface RenderReceipt { mode: "stable" | "preview"; designId: string; revision: number; hash: string; pluginInstanceId: string; clientInstanceId: string; sessionId?: string; generation?: number }
 
-export interface Config { profile?: string; themeFile?: string; assetDir?: string; controllerUrl?: string; pluginSecret?: string; previewSessionId?: string }
+export interface Config { profile?: string; themeFile?: string; assetDir?: string; controllerUrl?: string; pluginSecret?: string; previewSessionId?: string; controllerEntry?: string; dataDir?: string }
 export const inject = ["webServer"];
 // Must match the Controller's bounded background-asset storage ceiling.
 const MAX_BACKGROUND_ASSET_BYTES = 4 * 1024 * 1024;
@@ -256,10 +256,21 @@ export function apply(ctx: Context, config: Config = {}): void {
         if (!response.ok) throw new Error(`controller render acknowledgement failed: ${response.status}`);
       };
       const disposers = [
-        httpCtx.webServer.register({ kind: "exact", path: "/dsh-skin/studio", handler: (req, res) => {
+        httpCtx.webServer.register({ kind: "exact", path: "/dsh-skin/studio", handler: async (req, res) => {
           if (req.method !== "GET") { res.writeHead(405, { allow: "GET", "x-content-type-options": "nosniff" }); res.end(); return; }
           if (!isLoopbackHost(req.headers.host)) return json(res, 403, { error: "FORBIDDEN_HOST" });
-          res.writeHead(302, { location: config.controllerUrl!, "cache-control": "no-store", "x-content-type-options": "nosniff" }); res.end();
+          if (!config.controllerUrl) return json(res, 500, { error: "CONTROLLER_URL_MISSING" });
+          // The Controller is a separate process that may have died (or was
+          // never started after a reboot). If the installer recorded its
+          // entry point, bring it back instead of failing with an unreachable
+          // redirect — the settings card's "启动并打开 Skin Studio" must work
+          // even after the Controller went away.
+          if (!(await controllerAlive(config.controllerUrl))) {
+            if (!config.controllerEntry || !config.dataDir) return json(res, 503, { error: "CONTROLLER_UNAVAILABLE", message: "Studio Controller 未运行，且缺少自动启动配置（请重跑 install.ps1）" });
+            const started = await spawnController(config);
+            if (!started) return json(res, 503, { error: "CONTROLLER_START_FAILED", message: "Studio Controller 启动失败，请查看日志后重试" });
+          }
+          res.writeHead(302, { location: config.controllerUrl, "cache-control": "no-store", "x-content-type-options": "nosniff" }); res.end();
         } }),
         httpCtx.webServer.register({ kind: "exact", path: "/dsh-skin/health", handler: (_req, res) => json(res, 200, { ok: true, plugin: "@dsh-skin/dsh-plugin", version: "0.1.0", pluginInstanceId, mode: preview ? "preview" : "stable", designId: (preview ?? stable)?.designId ?? null, revision: (preview ?? stable)?.revision ?? null, hash: (preview ?? stable)?.hash ?? null }) }),
         httpCtx.webServer.register({ kind: "exact", path: "/dsh-skin/state", handler: async (_req, res) => { await refreshStable(); const active = preview ?? stable; if (!active) return json(res, 503, { error: "THEME_UNAVAILABLE" }); json(res, 200, { mode: preview ? "preview" : "stable", pluginInstanceId, ...active }); } }),
@@ -373,3 +384,58 @@ async function serveAsset(assetDir: string, req: IncomingMessage, res: ServerRes
   json(res, 404, { error: "ASSET_NOT_FOUND" });
 }
 function json(res: ServerResponse, status: number, body: unknown): void { res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" }); res.end(JSON.stringify(body)); }
+
+/**
+ * Probe the Studio Controller. `/dsh-skin/health` is the DSH-side plugin
+ * route when a preview host is up, while `/api/v1/status` is the Controller's
+ * own endpoint — probe the latter since the settings card redirects there.
+ */
+async function controllerAlive(base: string): Promise<boolean> {
+  try {
+    const response = await fetch(`${base}/api/v1/status`, { method: "GET", signal: AbortSignal.timeout(1_500) });
+    if (!response.ok) return false;
+    const body = await response.json() as { ok?: unknown };
+    return body.ok === true;
+  } catch { return false; }
+}
+
+/**
+ * Spawn the Controller process from the entry point the installer recorded,
+ * then wait for it to become healthy. The child inherits DSH_HOME and is
+ * given the same port/data-dir the rest of the integration uses; logs go to
+ * %TEMP% so a failed start is diagnosable.
+ */
+async function spawnController(config: Config): Promise<boolean> {
+  if (!config.controllerEntry || !config.controllerUrl || !config.dataDir) return false;
+  try {
+    const url = new URL(config.controllerUrl);
+    const port = Number.parseInt(url.port, 10);
+    if (!Number.isInteger(port) || port <= 0 || port > 65535) return false;
+    const { spawn } = await import("node:child_process");
+    const log = join(process.env.TEMP || ".", "dsh-skin-controller.out.log");
+    const errLog = join(process.env.TEMP || ".", "dsh-skin-controller.err.log");
+    const child = spawn(process.execPath, [config.controllerEntry], {
+      detached: true, stdio: "ignore", windowsHide: true,
+      env: { ...process.env, DSH_SKIN_PORT: String(port), DSH_SKIN_DATA_DIR: config.dataDir }
+    });
+    child.unref();
+    void logControllerOutput(child, log, errLog);
+    // Give it up to 12s to boot (it links/installs the isolated runtime the
+    // first time, which is the slowest path).
+    const deadline = Date.now() + 12_000;
+    while (Date.now() < deadline) {
+      if (await controllerAlive(config.controllerUrl)) return true;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 300));
+    }
+    return await controllerAlive(config.controllerUrl);
+  } catch { return false; }
+}
+
+/** Best-effort capture of the spawned Controller's stdout/stderr. */
+async function logControllerOutput(child: import("node:child_process").ChildProcess, outLog: string, errLog: string): Promise<void> {
+  try {
+    const { createWriteStream } = await import("node:fs");
+    if (child.stdout) child.stdout.pipe(createWriteStream(outLog, { flags: "a" }));
+    if (child.stderr) child.stderr.pipe(createWriteStream(errLog, { flags: "a" }));
+  } catch { /* logging must never break the spawn */ }
+}

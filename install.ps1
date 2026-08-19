@@ -135,6 +135,8 @@ $managedBlock = (@(
   "        themeFile: '$themeFile'",
   "        assetDir: '$assetDir'",
   "        controllerUrl: '$controllerUrl'",
+  "        controllerEntry: '$controllerEntry'",
+  "        dataDir: '$DataDir'",
   "        pluginSecret: '$secret'",
   "# <<< dsh-skin-studio managed block <<<"
 ) -join "`n")

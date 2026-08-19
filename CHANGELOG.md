@@ -1,5 +1,12 @@
 # Change notes
 
+## 2026-08-19 — Settings card auto-starts the Studio Controller when down
+
+- **Root cause**: the DSH settings card's "启动并打开 Skin Studio" link redirects to the Controller (`http://127.0.0.1:11862`). The Controller is a separate process the installer starts once; after a reboot or a crash it stays down, so the card produced "无法访问此页面" with no recovery path.
+- **Fix (host)**: `/dsh-skin/studio` now probes the Controller first (`/api/v1/status`); when it is unreachable and the plugin config carries `controllerEntry` + `dataDir` (written by `install.ps1`), the Host spawns the Controller with `DSH_SKIN_PORT` / `DSH_SKIN_DATA_DIR` inherited and waits up to 12 s for health before redirecting. A failed start returns a readable 503 instead of a dead redirect.
+- **install.ps1**: the managed `cordis.patch.yml` block now records `controllerEntry` and `dataDir` for the auto-start path.
+- Verified: with the Controller killed, the studio route reports unavailability until the config is present, then spawns and redirects successfully; Studio health 200.
+
 ## 2026-08-18 — DSH settings card opens Studio in a new tab only (no hijack)
 
 - **Root cause**: the settings card used `window.open("/dsh-skin/studio", "_blank", "noopener,noreferrer")` with a `window.location.assign("/dsh-skin/studio")` fallback. When the popup was blocked (or returned null), the fallback navigated the live DSH tab itself to Studio, producing two Studio tabs.
