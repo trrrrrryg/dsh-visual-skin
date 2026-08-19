@@ -1,5 +1,13 @@
 # Change notes
 
+## 2026-08-19 — Version bar + one-click update in the settings card
+
+- **New feature**: the DSH settings card now shows a version row ("当前版本 vX.Y.Z") and, when a newer GitHub release exists, a "一键更新" button.
+- Host: `/dsh-skin/version` queries `api.github.com/repos/trrrrrryg/dsh-visual-skin/releases/latest` (30 min cache, prerelease/draft ignored), compares dotted versions, and returns `{ current, latest, updateAvailable, releaseUrl, downloadUrl, notes }`. `/dsh-skin/update` downloads the tagged source archive, extracts it with `tar`, verifies the packaged runtime/plugin are built and the version matches the release, swaps the installed skill's `runtime` with a rollback backup, then restarts the Controller.
+- Client: the version row mounts via MutationObserver (waits for the card to actually connect — a microtask fired too early and left the row stuck at "版本检测中…"), fetches with `location.origin` + a 15 s abort timeout, and offers the update button only when `updateAvailable`.
+- Version bumped to 0.2.0 across all packages; `v0.2.0` GitHub release created. Health route now reports the real plugin version.
+- Verified: `/dsh-skin/version` returns correct JSON from the running DSH; the mount-wait logic fires the version fetch only after the card is attached and renders "发现新版本 v0.3.0" for an updateAvailable payload.
+
 ## 2026-08-19 — Fix isolated preview in installed runtime (plugin source resolution)
 
 - **Root cause**: after moving to the portable installed runtime, `resolvePluginSource()` defaulted to `<projectRoot>/packages/dsh-plugin`, where `projectRoot` resolves from the dist module as `<runtime>/node_modules` — the embedded plugin actually lives at `<runtime>/plugin` (sibling of `node_modules`). Every isolated preview then failed at provisioning with `DSH_SKIN_PLUGIN_SOURCE does not contain a built managed plugin`, so Studio showed "隔离预览未能建立" and no design could be previewed.

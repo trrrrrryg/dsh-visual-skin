@@ -1,15 +1,22 @@
 {
   "name": "@dsh-skin/agent-cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
-  "bin": { "dsh-skin": "dist/index.js" },
-  "exports": { ".": "./dist/client.js", "./cli": "./dist/index.js" },
+  "bin": {
+    "dsh-skin": "dist/index.js"
+  },
+  "exports": {
+    ".": "./dist/client.js",
+    "./cli": "./dist/index.js"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "node dist/index.js"
   },
-  "dependencies": { "@dsh-skin/shared": "workspace:*" }
+  "dependencies": {
+    "@dsh-skin/shared": "workspace:*"
+  }
 }

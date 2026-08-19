@@ -1390,13 +1390,109 @@ function installSkinSettingsCard(ctx: ClientContextLike): void {
     const cardStyle = { border: "1px solid var(--dsw-alias-border-l2)", background: "var(--dsw-alias-bg-layer-3)", borderRadius: "12px", listStyle: "none", padding: "16px" };
     const titleStyle = { color: "var(--dsw-alias-label-primary)", fontSize: "15px", fontWeight: 600, lineHeight: 1.4 };
     const descriptionStyle = { color: "var(--dsw-alias-label-tertiary)", fontSize: "13px", lineHeight: 1.5, marginTop: "4px" };
-    return jsx.jsxs("li", { style: cardStyle, "data-dsh-skin-settings-card": "1", children: [
+    const versionStyle = { display: "flex", alignItems: "center", gap: "10px", marginTop: "12px", color: "var(--dsw-alias-label-tertiary)", fontSize: "12px", lineHeight: 1.4 };
+    const updateStyle = { marginTop: "0", border: "0", borderRadius: "8px", padding: "5px 12px", color: "#fff", background: "#b84e2c", font: "inherit", fontSize: "12px", fontWeight: 600, cursor: "pointer" };
+    const node = jsx.jsxs("li", { style: cardStyle, "data-dsh-skin-settings-card": "1", children: [
       jsx.jsx("div", { style: titleStyle, children: "皮肤设置" }),
       jsx.jsx("div", { style: descriptionStyle, children: "打开本地 Skin Studio，实时设计并预览 DSH 皮肤。" }),
-      jsx.jsx("a", { href: "/dsh-skin/studio", target: "_blank", rel: "noopener noreferrer", style: openStudioStyle, children: "启动并打开 Skin Studio" })
+      jsx.jsx("div", { style: { display: "flex", gap: "10px", marginTop: "14px" }, children: [
+        jsx.jsx("a", { href: "/dsh-skin/studio", target: "_blank", rel: "noopener noreferrer", style: openStudioStyle, children: "启动并打开 Skin Studio" })
+      ] }),
+      jsx.jsx("div", { style: versionStyle, "data-dsh-skin-version-row": "1", children: "版本检测中…" })
     ] });
+    // Version bar + one-click update, driven with plain DOM so the card stays
+    // independent of any React hooks version in the host app. The card node is
+    // not connected when the factory runs (React mounts it later), so wait for
+    // the actual mount via MutationObserver instead of a microtask that runs
+    // too early and never retries.
+    const root = node as unknown as HTMLElement;
+    const row = root.querySelector<HTMLElement>("[data-dsh-skin-version-row]");
+    if (row) {
+      let attempts = 0;
+      const tryFetch = () => {
+        if (root.isConnected) { void fetchVersionRow(row, updateStyle); return true; }
+        attempts += 1;
+        return attempts >= 40; // ~4s cap: give up quietly if never mounted
+      };
+      if (!tryFetch()) {
+        const observer = new MutationObserver(() => {
+          if (tryFetch()) observer.disconnect();
+        });
+        observer.observe(document.documentElement, { childList: true, subtree: true });
+        window.setTimeout(() => observer.disconnect(), 5_000);
+      }
+    }
+    return node;
   };
   slots.inject("settings.plugin.item", () => slots.register({ name: "settings.plugin.item", id: "dsh-skin-studio", order: 30, label: "皮肤设置", registrant: "@dsh-skin/dsh-plugin" }, card));
+}
+
+interface VersionStatusPayload {
+  ok?: boolean;
+  current?: string;
+  latest?: string;
+  updateAvailable?: boolean;
+  releaseUrl?: string;
+  error?: { code?: string; message?: string };
+}
+async function fetchVersionRow(row: HTMLElement, updateStyle: Record<string, string | number>): Promise<void> {
+  try {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 15_000);
+    let response: Response;
+    try {
+      response = await fetch(`${location.origin}/dsh-skin/version`, { credentials: "same-origin", cache: "no-store", signal: controller.signal });
+    } finally {
+      window.clearTimeout(timeout);
+    }
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json() as VersionStatusPayload;
+    const current = payload.current ?? "?";
+    if (payload.updateAvailable && payload.latest) {
+      row.textContent = "";
+      const label = document.createElement("span");
+      label.textContent = `当前版本 v${current} · 发现新版本 v${payload.latest}`;
+      row.append(label);
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = "一键更新";
+      Object.assign(button.style, updateStyle);
+      button.onclick = () => void runUpdate(button, row);
+      row.append(button);
+    } else {
+      row.textContent = `当前版本 v${current}${payload.error ? " · 版本检查暂不可用" : " · 已是最新"}`;
+    }
+  } catch {
+    row.textContent = "版本检查暂不可用";
+  }
+}
+async function runUpdate(button: HTMLButtonElement, row: HTMLElement): Promise<void> {
+  const original = button.textContent ?? "";
+  button.disabled = true;
+  button.textContent = "正在下载更新…";
+  try {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 180_000);
+    let response: Response;
+    try {
+      response = await fetch(`${location.origin}/dsh-skin/update`, { method: "POST", credentials: "same-origin", cache: "no-store", headers: { "content-type": "application/json" }, body: "{}", signal: controller.signal });
+    } finally {
+      window.clearTimeout(timeout);
+    }
+    const payload = await response.json().catch(() => ({})) as { ok?: boolean; updatedTo?: string; error?: { code?: string; message?: string } };
+    if (!response.ok || payload.ok !== true) {
+      button.disabled = false;
+      button.textContent = "重试更新";
+      row.textContent = `更新失败：${payload.error?.message ?? `HTTP ${response.status}`}`;
+      return;
+    }
+    button.remove();
+    row.textContent = `已更新到 v${payload.updatedTo ?? ""}；请重启 DSH 后生效`;
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = original;
+    row.textContent = `更新失败：${error instanceof Error ? error.message : "网络错误"}`;
+  }
 }
 function nextPaint(): Promise<void> {
   return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));

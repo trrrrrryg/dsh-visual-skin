@@ -1,10 +1,12 @@
 {
   "name": "@dsh-skin/mcp-server",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
-  "bin": { "dsh-skin-mcp": "dist/index.js" },
+  "bin": {
+    "dsh-skin-mcp": "dist/index.js"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",

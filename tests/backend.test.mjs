@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import { createRequire } from "node:module";
 import { createServer as createNetServer } from "node:net";
@@ -247,7 +247,19 @@ test("Host fails closed without rc.6 effect and disposes every route", () => {
   applyHost({ inject(_names, callback) { callback({ webServer: { register() { return () => { disposed += 1; }; }, tapIndex() { return () => { disposed += 1; }; } }, effect(factory) { cleanup = factory(); } }); } }, config);
   assert.equal(typeof cleanup, "function");
   cleanup();
-  assert.equal(disposed, 8);
+  assert.equal(disposed, 10);
+});
+
+test("Host exposes version check and one-click update routes", () => {
+  const hostSource = readFileSync(join(projectRoot, "packages", "dsh-plugin", "src", "host", "index.ts"), "utf8");
+  assert.match(hostSource, /path: "\/dsh-skin\/version"/, "the Host must expose a version check route");
+  assert.match(hostSource, /path: "\/dsh-skin\/update"/, "the Host must expose a one-click update route");
+  assert.match(hostSource, /releases\/latest/, "the version check must query the GitHub latest release");
+  assert.match(hostSource, /function isNewerVersion/, "dotted versions must be compared with a stable comparator");
+  assert.match(hostSource, /updateAvailable/, "the version payload must carry an explicit updateAvailable flag");
+  const clientSource = readFileSync(join(projectRoot, "packages", "dsh-plugin", "src", "client", "index.ts"), "utf8");
+  assert.match(clientSource, /data-dsh-skin-version-row/, "the settings card must render a version row");
+  assert.match(clientSource, /一键更新/, "the settings card must offer a one-click update button when an update exists");
 });
 
 test("persistent skin style pins the theme onto html body and never touches the API key", async () => {

@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream, readFileSync } from "node:fs";
-import { readFile, stat } from "node:fs/promises";
+import { createReadStream, createWriteStream, readFileSync } from "node:fs";
+import { cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Context } from "@deepseek-ai/cordis";
 import type { WebServer } from "@deepseek-ai/dsh-host-webserver";
 
@@ -19,6 +21,21 @@ const BALANCE_CACHE_TTL_MS = 30_000;
 const BALANCE_TIMEOUT_MS = 8_000;
 const BALANCE_API_KEY_ENV = "DEEPSEEK_API_KEY";
 const BALANCE_BASE_URL = "https://api.deepseek.com";
+const UPDATE_CHECK_TTL_MS = 30 * 60_000;
+const UPDATE_OWNER = "trrrrrryg";
+const UPDATE_REPO = "dsh-visual-skin";
+const UPDATE_RELEASES_URL = `https://api.github.com/repos/${UPDATE_OWNER}/${UPDATE_REPO}/releases/latest`;
+const UPDATE_DOWNLOAD_TIMEOUT_MS = 120_000;
+// Resolved once: the plugin package version is the canonical product version.
+const PLUGIN_VERSION = readPackageVersion();
+function readPackageVersion(): string {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const manifest = JSON.parse(readFileSync(join(here, "..", "..", "package.json"), "utf8")) as { version?: string };
+    if (typeof manifest.version === "string" && /^\d+\.\d+\.\d+/.test(manifest.version)) return manifest.version;
+  } catch {}
+  return "0.0.0";
+}
 
 export interface BalancePayload {
   ok: boolean;
@@ -29,6 +46,19 @@ export interface BalancePayload {
   isAvailable?: boolean;
   queriedAt?: string;
   cached?: boolean;
+  error?: { code: string; message: string };
+}
+
+export interface UpdateStatus {
+  ok: boolean;
+  current: string;
+  latest?: string;
+  updateAvailable?: boolean;
+  releaseUrl?: string;
+  downloadUrl?: string;
+  notes?: string;
+  cached?: boolean;
+  checkedAt?: string;
   error?: { code: string; message: string };
 }
 
@@ -242,6 +272,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       const abort = new AbortController();
       let stable: ThemeDocument | null = null, preview: PreviewSession | null = null, controllerInstanceId = "";
       let balanceCache: { at: number; value: BalancePayload } | undefined;
+      let updateCache: { at: number; value: UpdateStatus } | undefined;
+      let updateBusy = false;
       const acknowledge = async (receipt: RenderReceipt) => {
         if (!controllerInstanceId) throw new Error("controller instance is unavailable");
         if (config.previewSessionId) {
@@ -272,7 +304,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           }
           res.writeHead(302, { location: config.controllerUrl, "cache-control": "no-store", "x-content-type-options": "nosniff" }); res.end();
         } }),
-        httpCtx.webServer.register({ kind: "exact", path: "/dsh-skin/health", handler: (_req, res) => json(res, 200, { ok: true, plugin: "@dsh-skin/dsh-plugin", version: "0.1.0", pluginInstanceId, mode: preview ? "preview" : "stable", designId: (preview ?? stable)?.designId ?? null, revision: (preview ?? stable)?.revision ?? null, hash: (preview ?? stable)?.hash ?? null }) }),
+        httpCtx.webServer.register({ kind: "exact", path: "/dsh-skin/health", handler: (_req, res) => json(res, 200, { ok: true, plugin: "@dsh-skin/dsh-plugin", version: PLUGIN_VERSION, pluginInstanceId, mode: preview ? "preview" : "stable", designId: (preview ?? stable)?.designId ?? null, revision: (preview ?? stable)?.revision ?? null, hash: (preview ?? stable)?.hash ?? null }) }),
         httpCtx.webServer.register({ kind: "exact", path: "/dsh-skin/state", handler: async (_req, res) => { await refreshStable(); const active = preview ?? stable; if (!active) return json(res, 503, { error: "THEME_UNAVAILABLE" }); json(res, 200, { mode: preview ? "preview" : "stable", pluginInstanceId, ...active }); } }),
         httpCtx.webServer.register({ kind: "exact", path: "/dsh-skin/theme", handler: async (_req, res) => { await refreshStable(); const active = preview ?? stable; if (!active) return json(res, 503, { error: "THEME_UNAVAILABLE" }); json(res, 200, active.theme); } }),
         httpCtx.webServer.register({ kind: "exact", path: "/dsh-skin/rendered", handler: async (req, res) => {
@@ -306,6 +338,41 @@ export function apply(ctx: Context, config: Config = {}): void {
             json(res, 200, payload);
           } catch (error) {
             json(res, 200, { ok: false, error: { code: "BALANCE_QUERY_FAILED", message: error instanceof Error ? error.name === "AbortError" ? "余额查询超时" : error.message.replace(/\s+/g, " ").slice(0, 120) : "余额查询失败" } });
+          }
+        } }),
+        httpCtx.webServer.register({ kind: "exact", path: "/dsh-skin/version", handler: async (_req, res) => {
+          if (_req.method !== "GET") { res.writeHead(405, { allow: "GET", "x-content-type-options": "nosniff" }); res.end(); return; }
+          if (!isLoopbackHost(_req.headers.host)) return json(res, 403, { error: "FORBIDDEN_HOST" });
+          if (updateCache && Date.now() - updateCache.at < UPDATE_CHECK_TTL_MS) {
+            json(res, 200, { ...updateCache.value, cached: true });
+            return;
+          }
+          try {
+            const status = await fetchLatestReleaseStatus();
+            updateCache = { at: Date.now(), value: status };
+            json(res, 200, status);
+          } catch (error) {
+            json(res, 200, { ok: false, current: PLUGIN_VERSION, error: { code: "UPDATE_CHECK_FAILED", message: error instanceof Error ? error.message.replace(/\s+/g, " ").slice(0, 120) : "版本检查失败" } });
+          }
+        } }),
+        httpCtx.webServer.register({ kind: "exact", path: "/dsh-skin/update", handler: async (req, res) => {
+          if (req.method !== "POST") { res.writeHead(405, { allow: "POST", "x-content-type-options": "nosniff" }); res.end(); return; }
+          if (!isLoopbackHost(req.headers.host)) return json(res, 403, { error: "FORBIDDEN_HOST" });
+          if (updateBusy) return json(res, 409, { ok: false, error: { code: "UPDATE_IN_PROGRESS", message: "更新已在执行中" } });
+          updateBusy = true;
+          try {
+            const status = await fetchLatestReleaseStatus();
+            if (!status.ok || !status.latest || !status.updateAvailable || !status.downloadUrl) {
+              json(res, 400, { ok: false, error: { code: "NOTHING_TO_UPDATE", message: "当前已是最新版本" } });
+              return;
+            }
+            const result = await performUpdate(status);
+            updateCache = { at: 0, value: await fetchLatestReleaseStatus() };
+            json(res, 200, result);
+          } catch (error) {
+            json(res, 500, { ok: false, error: { code: "UPDATE_FAILED", message: error instanceof Error ? error.message.replace(/\s+/g, " ").slice(0, 200) : "更新失败" } });
+          } finally {
+            updateBusy = false;
           }
         } }),
         // The persistent skin base rides the same official index seam the
@@ -439,3 +506,160 @@ async function logControllerOutput(child: import("node:child_process").ChildProc
     if (child.stderr) child.stderr.pipe(createWriteStream(errLog, { flags: "a" }));
   } catch { /* logging must never break the spawn */ }
 }
+
+/** Compare dotted versions; returns true when `a` is newer than `b`. */
+function isNewerVersion(a: string, b: string): boolean {
+  const pa = a.split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const pb = b.split(".").map((part) => Number.parseInt(part, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i += 1) {
+    const da = pa[i] ?? 0, db = pb[i] ?? 0;
+    if (da !== db) return da > db;
+  }
+  return false;
+}
+
+/**
+ * Query GitHub Releases for the latest release of this repository. The
+ * tag must be a plain version (e.g. `v0.1.1`); prerelease tags are ignored
+ * so the settings card only ever offers stable upgrades.
+ */
+async function fetchLatestReleaseStatus(): Promise<UpdateStatus> {
+  const response = await fetch(UPDATE_RELEASES_URL, {
+    headers: { accept: "application/vnd.github+json", "user-agent": "dsh-visual-skin" },
+    signal: AbortSignal.timeout(10_000)
+  });
+  if (!response.ok) throw new Error(`GitHub 版本检查失败: HTTP ${response.status}`);
+  const release = await response.json() as { tag_name?: unknown; html_url?: unknown; body?: unknown; draft?: unknown; prerelease?: unknown };
+  if (release.draft === true || release.prerelease === true) return { ok: true, current: PLUGIN_VERSION, updateAvailable: false, checkedAt: new Date().toISOString() };
+  const tag = typeof release.tag_name === "string" ? release.tag_name.replace(/^v/i, "") : "";
+  if (!/^\d+\.\d+\.\d+/.test(tag)) return { ok: true, current: PLUGIN_VERSION, updateAvailable: false, checkedAt: new Date().toISOString() };
+  const downloadUrl = `https://github.com/${UPDATE_OWNER}/${UPDATE_REPO}/archive/refs/tags/${encodeURIComponent(String(release.tag_name))}.zip`;
+  return {
+    ok: true,
+    current: PLUGIN_VERSION,
+    latest: tag,
+    updateAvailable: isNewerVersion(tag, PLUGIN_VERSION),
+    ...(typeof release.html_url === "string" ? { releaseUrl: release.html_url } : {}),
+    downloadUrl,
+    ...(typeof release.body === "string" ? { notes: release.body.slice(0, 500) } : {}),
+    checkedAt: new Date().toISOString()
+  };
+}
+
+/**
+ * One-click update: download the tagged source archive, extract it, verify
+ * the version manifest matches the release being installed, then replace the
+ * installed skill's runtime and plugin dist with the freshly built ones.
+ * Returns after the replacement is staged; DSH restart is left to the user.
+ */
+async function performUpdate(status: UpdateStatus): Promise<{ ok: true; updatedTo: string; staged: string[]; restartRequired: true }> {
+  const latest = status.latest;
+  const downloadUrl = status.downloadUrl;
+  if (!latest || !downloadUrl) throw new Error("缺少更新信息");
+  // The managed layout is <skill>/runtime/node_modules/@dsh-skin/controller/dist,
+  // so the skill root sits four levels above this dist module.
+  const here = dirname(fileURLToPath(import.meta.url));
+  const skillRoot = resolve(here, "..", "..", "..", "..", "..");
+  if (!(await exists(join(skillRoot, "SKILL.md")))) throw new Error("未找到已安装的 Skill（无法定位更新目标）");
+  const work = join(tmpdir(), `dsh-skin-update-${latest}-${randomUUID().slice(0, 8)}`);
+  await mkdir(work, { recursive: true });
+  const zipPath = join(work, "release.zip");
+  try {
+    // 1. download (Web Streams body -> node write stream)
+    const response = await fetch(downloadUrl, { signal: AbortSignal.timeout(UPDATE_DOWNLOAD_TIMEOUT_MS) });
+    if (!response.ok) throw new Error(`下载安装包失败: HTTP ${response.status}`);
+    if (!response.body) throw new Error("下载内容为空");
+    {
+      const file = createWriteStream(zipPath);
+      const reader = response.body.getReader();
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          await new Promise<void>((resolveWrite, rejectWrite) => file.write(Buffer.from(value), (error) => (error ? rejectWrite(error) : resolveWrite())));
+        }
+      } finally {
+        await new Promise<void>((resolveClose) => file.end(() => resolveClose()));
+        reader.releaseLock();
+      }
+    }
+    // 2. extract (Windows ships tar.exe which reads zip archives)
+    await new Promise<void>((resolveExtract, rejectExtract) => {
+      const child = spawn("tar", ["-xf", zipPath, "-C", work], { shell: false, windowsHide: true });
+      child.on("error", rejectExtract);
+      child.on("exit", (code) => (code === 0 ? resolveExtract() : rejectExtract(new Error(`解压失败: tar 退出码 ${code}`))));
+    });
+    // 3. locate the skill bundle inside the archive
+    const entries = await readdirDeep(work);
+    let skillCandidate: string | undefined;
+    for (const entry of entries) {
+      if (/[\\/]agents[\\/]codex-skill[\\/]deepseek-harness-skin-studio$/.test(entry) && await exists(join(entry, "SKILL.md"))) { skillCandidate = entry; break; }
+    }
+    if (!skillCandidate) throw new Error("安装包缺少 Skill 目录（agents/codex-skill/deepseek-harness-skin-studio）");
+    // 4. verify the packaged runtime is built and version matches the release
+    const packagedRuntime = join(skillCandidate, "runtime");
+    if (!(await exists(join(packagedRuntime, "node_modules", "@dsh-skin", "controller", "dist", "index.js")))) throw new Error("安装包中的 runtime 未构建（请先运行 install.ps1 的构建步骤再发布）");
+    const packagedPlugin = join(packagedRuntime, "plugin");
+    if (!(await exists(join(packagedPlugin, "dist", "host", "index.js")))) throw new Error("安装包中的插件未构建");
+    const packagedManifest = join(packagedRuntime, "node_modules", "@dsh-skin", "dsh-plugin", "package.json");
+    if (await exists(packagedManifest)) {
+      const manifest = JSON.parse(await readFile(packagedManifest, "utf8")) as { version?: string };
+      if (manifest.version && manifest.version !== latest) throw new Error(`安装包版本 ${manifest.version} 与发布版本 ${latest} 不一致`);
+    }
+    // 5. stage replacement: swap runtime and plugin dist with backups
+    const staged: string[] = [];
+    const runtimeTarget = join(skillRoot, "runtime");
+    const backup = join(tmpdir(), `dsh-skin-runtime-backup-${Date.now()}`);
+    if (await exists(runtimeTarget)) {
+      await rename(runtimeTarget, backup);
+      staged.push("runtime");
+    }
+    try {
+      await cp(packagedRuntime, runtimeTarget, { recursive: true });
+      await rm(backup, { recursive: true, force: true });
+    } catch (error) {
+      // roll back on failure
+      if (await exists(backup) && !(await exists(runtimeTarget))) await rename(backup, runtimeTarget);
+      throw error;
+    }
+    // 6. restart the Controller so the new runtime serves the updated Studio
+    const controllerEntry = join(runtimeTarget, "node_modules", "@dsh-skin", "controller", "dist", "index.js");
+    if (await exists(controllerEntry)) {
+      // Kill the process currently listening on the Controller port (if any).
+      try {
+        const { execFile } = await import("node:child_process");
+        const { promisify } = await import("node:util");
+        const execFileAsync = promisify(execFile);
+        const out = await execFileAsync("netstat", ["-ano", "-p", "tcp"], { timeout: 5_000, windowsHide: true });
+        const line = out.stdout.split(/\r?\n/).find((row) => row.includes(":11862") && /LISTENING/i.test(row));
+        const pid = line?.trim().split(/\s+/).pop();
+        if (pid && /^\d+$/.test(pid)) { try { await execFileAsync("taskkill", ["/F", "/PID", pid], { timeout: 5_000, windowsHide: true }); } catch {} }
+      } catch {}
+      const env = { ...process.env, DSH_SKIN_PORT: "11862", DSH_SKIN_DATA_DIR: join(process.env.LOCALAPPDATA || ".", "DeepSeekHarnessSkinStudio") };
+      const child = spawn(process.execPath, [controllerEntry], { detached: true, stdio: "ignore", windowsHide: true, env });
+      child.unref();
+    }
+    return { ok: true, updatedTo: latest, staged, restartRequired: true };
+  } finally {
+    await rm(work, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+async function readdirDeep(root: string): Promise<string[]> {
+  const out: string[] = [];
+  const stack = [root];
+  while (stack.length > 0) {
+    const dir = stack.pop()!;
+    let names: string[];
+    try { names = await readdir(dir); } catch { continue; }
+    for (const name of names) {
+      const full = join(dir, name);
+      let isDir = false;
+      try { isDir = (await stat(full)).isDirectory(); } catch { continue; }
+      if (isDir) stack.push(full);
+      out.push(full);
+    }
+  }
+  return out;
+}
+async function exists(path: string): Promise<boolean> { try { await stat(path); return true; } catch { return false; } }

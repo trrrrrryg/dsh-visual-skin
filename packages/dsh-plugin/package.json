@@ -1,6 +1,6 @@
 {
   "name": "@dsh-skin/dsh-plugin",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "main": "dist/host/index.js",
@@ -9,7 +9,11 @@
     "./client": "./dist/client/index.js",
     "./package.json": "./package.json"
   },
-  "files": ["dist", "capabilities", "cordis.patch.yml"],
+  "files": [
+    "dist",
+    "capabilities",
+    "cordis.patch.yml"
+  ],
   "dsh": {
     "client": {
       "inject": [
@@ -29,11 +33,21 @@
     "@deepseek-ai/dsh-host-webserver": "0.1.0-rc.6"
   },
   "peerDependenciesMeta": {
-    "@deepseek-ai/cordis": { "optional": true },
-    "@deepseek-ai/dsh-client-runtime": { "optional": true },
-    "@deepseek-ai/dsh-client-ui-theme": { "optional": true },
-    "@deepseek-ai/dsh-client-ui-settings-plugins": { "optional": true },
-    "@deepseek-ai/dsh-host-webserver": { "optional": true }
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-runtime": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-theme": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-settings-plugins": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-host-webserver": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.1",
