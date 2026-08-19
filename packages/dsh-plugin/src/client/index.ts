@@ -1373,103 +1373,68 @@ function installSkinSettingsCard(ctx: ClientContextLike): void {
   const slots = ctx.slots ?? ctx.get?.("slots") as SlotsLike | undefined;
   if (!slots || typeof slots.inject !== "function" || typeof slots.register !== "function") return;
   let jsx: ReactJsxRuntimeLike;
+  let react: { useState: <T>(init: T | (() => T)) => [T, (next: T) => void]; useEffect: (effect: () => void | (() => void), deps?: unknown[]) => void };
   try {
     // The rc.6 client-module wrapper supplies CommonJS `require` to this
-    // self-contained factory. Keeping the lookup runtime-only avoids an ESM
-    // import that would violate the DSH client-module registration contract.
+    // self-contained factory. DSH's own settings plugins resolve these the
+    // same way, so the lookup is reliable inside the loader.
     jsx = require("react/jsx-runtime") as ReactJsxRuntimeLike;
+    react = require("react") as typeof react;
   } catch {
     return;
   }
   const card = (_props: unknown): unknown => {
-    // Open Studio in a brand-new tab with a native anchor. A window.open +
-    // location.assign fallback could navigate the live DSH page itself to
-    // Studio when the popup is blocked (two Studio tabs); a plain
-    // target="_blank" link can never hijack the current tab.
-    const openStudioStyle = { marginTop: "14px", border: "0", borderRadius: "8px", padding: "7px 14px", display: "inline-block", color: "var(--dsw-alias-bg-layer-3)", background: "var(--dsw-alias-label-primary)", font: "inherit", cursor: "pointer", textDecoration: "none" };
+    // Card must return a React element (the slots renderer mounts entries as
+    // React children; a raw DOM node crashes with React error #31).
+    const [version, setVersion] = ReactLikeState<string | VersionStatusPayload>("版本检测中…", react);
+    const [updateError, setUpdateError] = ReactLikeState<string | null>(null, react);
+    ReactLikeEffect(() => {
+      let cancelled = false;
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 15_000);
+      fetch(`${location.origin}/dsh-skin/version`, { credentials: "same-origin", cache: "no-store", signal: controller.signal })
+        .then((response) => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.json() as Promise<VersionStatusPayload>; })
+        .then((payload) => { if (cancelled) return; setVersion(describeVersion(payload)); })
+        .catch(() => { if (!cancelled) setVersion("版本检查暂不可用"); })
+        .finally(() => window.clearTimeout(timeout));
+      return () => { cancelled = true; controller.abort(); };
+    }, react);
+    const openStudioStyle = { marginTop: "0", border: "0", borderRadius: "8px", padding: "7px 14px", display: "inline-block", color: "var(--dsw-alias-bg-layer-3)", background: "var(--dsw-alias-label-primary)", font: "inherit", cursor: "pointer", textDecoration: "none" };
     const cardStyle = { border: "1px solid var(--dsw-alias-border-l2)", background: "var(--dsw-alias-bg-layer-3)", borderRadius: "12px", listStyle: "none", padding: "16px" };
     const titleStyle = { color: "var(--dsw-alias-label-primary)", fontSize: "15px", fontWeight: 600, lineHeight: 1.4 };
     const descriptionStyle = { color: "var(--dsw-alias-label-tertiary)", fontSize: "13px", lineHeight: 1.5, marginTop: "4px" };
     const versionStyle = { display: "flex", alignItems: "center", gap: "10px", marginTop: "12px", color: "var(--dsw-alias-label-tertiary)", fontSize: "12px", lineHeight: 1.4 };
-    const updateStyle = { marginTop: "0", border: "0", borderRadius: "8px", padding: "5px 12px", color: "#fff", background: "#b84e2c", font: "inherit", fontSize: "12px", fontWeight: 600, cursor: "pointer" };
-    const node = jsx.jsxs("li", { style: cardStyle, "data-dsh-skin-settings-card": "1", children: [
+    const updateStyle = { marginTop: "0", border: "0", borderRadius: "8px", padding: "5px 12px", color: "#fff", background: "#b84e2c", font: "inherit", fontSize: "12px", fontWeight: "600", cursor: "pointer" };
+    const needsUpdate = typeof version === "object" && version !== null && "latest" in version;
+    const currentLabel = typeof version === "object" && version !== null ? `当前版本 v${(version as VersionStatusPayload).current ?? "?"}` : version;
+    return jsx.jsxs("li", { style: cardStyle, "data-dsh-skin-settings-card": "1", children: [
       jsx.jsx("div", { style: titleStyle, children: "皮肤设置" }),
       jsx.jsx("div", { style: descriptionStyle, children: "打开本地 Skin Studio，实时设计并预览 DSH 皮肤。" }),
       jsx.jsx("div", { style: { display: "flex", gap: "10px", marginTop: "14px" }, children: [
         jsx.jsx("a", { href: "/dsh-skin/studio", target: "_blank", rel: "noopener noreferrer", style: openStudioStyle, children: "启动并打开 Skin Studio" })
       ] }),
-      jsx.jsx("div", { style: versionStyle, "data-dsh-skin-version-row": "1", children: "版本检测中…" })
+      jsx.jsx("div", { style: versionStyle, "data-dsh-skin-version-row": "1", children: [
+        jsx.jsx("span", { children: currentLabel }),
+        needsUpdate ? jsx.jsx("button", { type: "button", style: updateStyle, onClick: () => { void runUpdateReact(setVersion, setUpdateError, react); }, children: updateError ?? "一键更新" }) : null
+      ] })
     ] });
-    // Version bar + one-click update, driven with plain DOM so the card stays
-    // independent of any React hooks version in the host app. The card node is
-    // not connected when the factory runs (React mounts it later), so wait for
-    // the actual mount via MutationObserver instead of a microtask that runs
-    // too early and never retries.
-    const root = node as unknown as HTMLElement;
-    const row = root.querySelector<HTMLElement>("[data-dsh-skin-version-row]");
-    if (row) {
-      let attempts = 0;
-      const tryFetch = () => {
-        if (root.isConnected) { void fetchVersionRow(row, updateStyle); return true; }
-        attempts += 1;
-        return attempts >= 40; // ~4s cap: give up quietly if never mounted
-      };
-      if (!tryFetch()) {
-        const observer = new MutationObserver(() => {
-          if (tryFetch()) observer.disconnect();
-        });
-        observer.observe(document.documentElement, { childList: true, subtree: true });
-        window.setTimeout(() => observer.disconnect(), 5_000);
-      }
-    }
-    return node;
   };
   slots.inject("settings.plugin.item", () => slots.register({ name: "settings.plugin.item", id: "dsh-skin-studio", order: 30, label: "皮肤设置", registrant: "@dsh-skin/dsh-plugin" }, card));
 }
 
-interface VersionStatusPayload {
-  ok?: boolean;
-  current?: string;
-  latest?: string;
-  updateAvailable?: boolean;
-  releaseUrl?: string;
-  error?: { code?: string; message?: string };
+function ReactLikeState<T>(initial: T, react: { useState: <S>(init: S | (() => S)) => [S, (next: S) => void] }): [T, (next: T) => void] {
+  return react.useState(initial);
 }
-async function fetchVersionRow(row: HTMLElement, updateStyle: Record<string, string | number>): Promise<void> {
-  try {
-    const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), 15_000);
-    let response: Response;
-    try {
-      response = await fetch(`${location.origin}/dsh-skin/version`, { credentials: "same-origin", cache: "no-store", signal: controller.signal });
-    } finally {
-      window.clearTimeout(timeout);
-    }
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const payload = await response.json() as VersionStatusPayload;
-    const current = payload.current ?? "?";
-    if (payload.updateAvailable && payload.latest) {
-      row.textContent = "";
-      const label = document.createElement("span");
-      label.textContent = `当前版本 v${current} · 发现新版本 v${payload.latest}`;
-      row.append(label);
-      const button = document.createElement("button");
-      button.type = "button";
-      button.textContent = "一键更新";
-      Object.assign(button.style, updateStyle);
-      button.onclick = () => void runUpdate(button, row);
-      row.append(button);
-    } else {
-      row.textContent = `当前版本 v${current}${payload.error ? " · 版本检查暂不可用" : " · 已是最新"}`;
-    }
-  } catch {
-    row.textContent = "版本检查暂不可用";
-  }
+function ReactLikeEffect(effect: () => void | (() => void), react: { useEffect: (fn: () => void | (() => void), deps?: unknown[]) => void }): void {
+  react.useEffect(effect, []);
 }
-async function runUpdate(button: HTMLButtonElement, row: HTMLElement): Promise<void> {
-  const original = button.textContent ?? "";
-  button.disabled = true;
-  button.textContent = "正在下载更新…";
+function describeVersion(payload: VersionStatusPayload): string | VersionStatusPayload {
+  if (payload.updateAvailable && payload.latest) return payload;
+  return `当前版本 v${payload.current ?? "?"}${payload.error ? " · 版本检查暂不可用" : " · 已是最新"}`;
+}
+async function runUpdateReact(setVersion: (v: string | VersionStatusPayload) => void, setUpdateError: (e: string | null) => void, react: { useState: <S>(init: S | (() => S)) => [S, (next: S) => void] }): Promise<void> {
+  void react;
+  setUpdateError("正在下载更新…");
   try {
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 180_000);
@@ -1481,18 +1446,23 @@ async function runUpdate(button: HTMLButtonElement, row: HTMLElement): Promise<v
     }
     const payload = await response.json().catch(() => ({})) as { ok?: boolean; updatedTo?: string; error?: { code?: string; message?: string } };
     if (!response.ok || payload.ok !== true) {
-      button.disabled = false;
-      button.textContent = "重试更新";
-      row.textContent = `更新失败：${payload.error?.message ?? `HTTP ${response.status}`}`;
+      setUpdateError(`更新失败：${payload.error?.message ?? `HTTP ${response.status}`} · 点击重试`);
       return;
     }
-    button.remove();
-    row.textContent = `已更新到 v${payload.updatedTo ?? ""}；请重启 DSH 后生效`;
+    setVersion(`已更新到 v${payload.updatedTo ?? ""}；请重启 DSH 后生效`);
+    setUpdateError(null);
   } catch (error) {
-    button.disabled = false;
-    button.textContent = original;
-    row.textContent = `更新失败：${error instanceof Error ? error.message : "网络错误"}`;
+    setUpdateError(`更新失败：${error instanceof Error ? error.message : "网络错误"} · 点击重试`);
   }
+}
+
+interface VersionStatusPayload {
+  ok?: boolean;
+  current?: string;
+  latest?: string;
+  updateAvailable?: boolean;
+  releaseUrl?: string;
+  error?: { code?: string; message?: string };
 }
 function nextPaint(): Promise<void> {
   return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));

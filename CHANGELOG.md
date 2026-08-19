@@ -1,5 +1,11 @@
 # Change notes
 
+## 2026-08-19 — Fix settings card crash (React element contract)
+
+- **Root cause**: the settings card factory returned a raw `HTMLLIElement` (plain-DOM attempt to avoid `react/jsx-runtime`), but DSH's slots renderer mounts `settings.plugin.item` entries as **React children** — a DOM node crashes with `Minified React error #31` and the slot entry is dropped ("皮肤设置" card disappeared while balance/backdrop features kept working).
+- **Fix**: the card is back to a React element. `require("react")` + `require("react/jsx-runtime")` resolve inside the DSH module loader exactly like DSH's own settings plugins (verified: builtin packages use the same requires), and the version row now uses `useState`/`useEffect` hooks instead of a mount-polling MutationObserver.
+- Verified in real Chromium: opening 设置 → 插件 shows the "皮肤设置" card with "当前版本 v0.2.0 · 已是最新"; no React slot crash.
+
 ## 2026-08-19 — Version bar + one-click update in the settings card
 
 - **New feature**: the DSH settings card now shows a version row ("当前版本 vX.Y.Z") and, when a newer GitHub release exists, a "一键更新" button.
