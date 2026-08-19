@@ -102,7 +102,7 @@ export const inject = ["theme", "slots"] as const;
  */
 export function apply(ctx: ClientContextLike): void {
   installSkinSettingsCard(ctx);
-  installQuotaSettingsCard(ctx);
+  installQuotaSettingsSection(ctx);
   const themeRuntime = ctx.theme ?? ctx.get?.("theme") as ThemeRuntimeLike | undefined;
   if (!themeRuntime?.overrideTokens || typeof ctx.effect !== "function") {
     document.documentElement.dataset.dshSkinStatus = "blocked";
@@ -1271,12 +1271,14 @@ function quotaMonthCells(month: string, days: QuotaDayView[] | undefined, todayK
 }
 
 /**
- * 额度查看 settings card — the single balance/usage surface since the
- * composer chip and sidebar button were removed. Shows the current balance,
- * today's consumed quota (estimated ¥) and tokens, this month's tokens, and a
- * day grid (gray = no usage, blue = used; hover shows the day's quota/tokens).
+ * 额度查看 settings section — the single balance/usage surface since the
+ * composer chip and sidebar button were removed. Registered as its own
+ * settings nav section (between 插件 and Agent 预设). Shows the current
+ * balance, today's consumed quota (estimated ¥) and tokens, this month's
+ * tokens, and a day grid (gray = no usage, blue = used; hover shows the
+ * day's quota/tokens).
  */
-function installQuotaSettingsCard(ctx: ClientContextLike): void {
+function installQuotaSettingsSection(ctx: ClientContextLike): void {
   const slots = ctx.slots ?? ctx.get?.("slots") as SlotsLike | undefined;
   if (!slots || typeof slots.inject !== "function" || typeof slots.register !== "function") return;
   let jsx: ReactJsxRuntimeLike;
@@ -1290,7 +1292,7 @@ function installQuotaSettingsCard(ctx: ClientContextLike): void {
   } catch {
     return;
   }
-  const card = (_props: unknown): unknown => {
+  const section = (_props: unknown): unknown => {
     const [balance, setBalance] = react.useState<BalanceValue | null | undefined>(readStoredBalance());
     const [balanceFailed, setBalanceFailed] = react.useState(false);
     const [usage, setUsage] = react.useState<QuotaUsagePayload | null>(null);
@@ -1354,7 +1356,8 @@ function installQuotaSettingsCard(ctx: ClientContextLike): void {
     const monthTokens = quotaTotalTokens(monthTotal);
     const cells = quotaMonthCells(month, usage?.days, todayKey);
     const monthHasUsage = (monthTotal?.requests ?? 0) > 0;
-    const cardStyle = { border: "1px solid var(--dsw-alias-border-l2)", background: "var(--dsw-alias-bg-layer-3)", borderRadius: "12px", listStyle: "none", padding: "16px" };
+    const sectionStyle = { maxWidth: "760px", display: "flex", flexDirection: "column", gap: "12px", padding: "4px 0 20px" };
+    const cardStyle = { border: "1px solid var(--dsw-alias-border-l2)", background: "var(--dsw-alias-bg-layer-3)", borderRadius: "12px", padding: "16px" };
     const titleStyle = { color: "var(--dsw-alias-label-primary)", fontSize: "15px", fontWeight: 600, lineHeight: 1.4 };
     const descriptionStyle = { color: "var(--dsw-alias-label-tertiary)", fontSize: "13px", lineHeight: 1.5, marginTop: "4px" };
     const statBlock = (label: string, value: string) => jsx.jsxs("div", { style: { border: "1px solid var(--dsw-alias-border-l1)", background: "var(--dsw-alias-bg-layer-2)", borderRadius: "10px", padding: "10px" }, children: [
@@ -1371,12 +1374,13 @@ function installQuotaSettingsCard(ctx: ClientContextLike): void {
       jsx.jsx("span", { style: { width: "10px", height: "10px", borderRadius: "3px", background: color, display: "inline-block" } }),
       jsx.jsx("span", { children: label })
     ] });
-    return jsx.jsxs("li", { style: cardStyle, "data-dsh-skin-quota-card": "1", children: [
+    return jsx.jsxs("div", { style: sectionStyle, "data-dsh-skin-quota-section": "1", children: [
       jsx.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between" }, children: [
-        jsx.jsx("div", { style: titleStyle, children: "额度查看" }),
+        jsx.jsx("div", { style: { ...titleStyle, fontSize: "16px" }, children: "额度查看" }),
         jsx.jsx("button", { type: "button", onClick: refresh, style: { border: "0", borderRadius: "8px", padding: "5px 12px", color: "var(--dsw-alias-label-secondary)", background: "var(--dsw-alias-bg-layer-2)", font: "inherit", fontSize: "12px", cursor: "pointer" }, children: refreshing ? "刷新中…" : "刷新" })
       ] }),
-      jsx.jsx("div", { style: { display: "flex", alignItems: "baseline", gap: "8px", marginTop: "12px" }, children: [
+      jsx.jsxs("div", { style: cardStyle, children: [
+      jsx.jsx("div", { style: { display: "flex", alignItems: "baseline", gap: "8px" }, children: [
         jsx.jsx("span", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: "12px" }, children: "当前余额" }),
         jsx.jsx("span", { style: { color: "var(--dsw-alias-label-primary)", fontSize: "22px", fontWeight: 700, fontVariantNumeric: "tabular-nums" }, children: balanceText })
       ] }),
@@ -1451,9 +1455,10 @@ function installQuotaSettingsCard(ctx: ClientContextLike): void {
             : jsx.jsx("div", { children: "当日无消耗" })
         ]
       }) : null
+      ] })
     ] });
   };
-  slots.inject("settings.plugin.item", () => slots.register({ name: "settings.plugin.item", id: "dsh-skin-quota", order: 20, label: "额度查看", registrant: "@dsh-skin/dsh-plugin" }, card));
+  slots.inject("settings.section", () => slots.register({ name: "settings.section", id: "quota", order: 17, label: "额度查看", registrant: "@dsh-skin/dsh-plugin" }, section));
 }
 
 function ReactLikeState<T>(initial: T, react: { useState: <S>(init: S | (() => S)) => [S, (next: S) => void] }): [T, (next: T) => void] {
