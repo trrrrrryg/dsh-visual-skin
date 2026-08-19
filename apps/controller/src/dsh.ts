@@ -27,7 +27,17 @@ interface InstallationRecord {
 interface PluginSecretRecord { targetKey: string; secret: string; secretHash: string; createdAt: string }
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
-const defaultPluginSource = join(projectRoot, "packages", "dsh-plugin");
+// Source-checkout layout: <project>/packages/dsh-plugin.
+const sourcePluginSource = join(projectRoot, "packages", "dsh-plugin");
+// Installed portable-runtime layout: <runtime>/plugin sits alongside
+// <runtime>/node_modules/@dsh-skin/controller/dist, so the dist module is
+// four levels deep and the embedded plugin is at <runtime>/plugin.
+const runtimePluginSource = resolve(dirname(fileURLToPath(import.meta.url)), "../../../../plugin");
+const pluginSourceCandidates = () => {
+  const explicit = process.env.DSH_SKIN_PLUGIN_SOURCE;
+  const candidates = explicit ? [explicit] : [sourcePluginSource, runtimePluginSource];
+  return candidates.filter((candidate) => isAbsolute(candidate) && resolve(candidate) === candidate);
+};
 const PATCH_START = "# >>> dsh-skin-studio managed block >>>";
 const PATCH_END = "# <<< dsh-skin-studio managed block <<<";
 
@@ -228,14 +238,15 @@ async function atomicExternalText(path: string, value: string): Promise<void> { 
 async function exists(path: string): Promise<boolean> { try { await stat(path); return true; } catch { return false; } }
 function assertTarget(target: DshTarget): void { if (!target.dshHome || (!resolve(target.dshHome).toLowerCase().endsWith(".dsh") && process.env.DSH_SKIN_ALLOW_ANY_HOME !== "1")) throw new AppError(ERROR_CODES.badRequest, "dshHome must be an explicit .dsh directory", 400); if (!/^[a-zA-Z0-9_-]{1,40}$/.test(target.profile)) throw new AppError(ERROR_CODES.badRequest, "Invalid profile name", 400); }
 async function resolvePluginSource(): Promise<string> {
-  const configured = process.env.DSH_SKIN_PLUGIN_SOURCE;
-  const source = configured ?? defaultPluginSource;
-  if (configured && (!isAbsolute(configured) || resolve(configured) !== configured)) throw new AppError(ERROR_CODES.badRequest, "DSH_SKIN_PLUGIN_SOURCE must be a canonical absolute path", 400);
-  try {
-    if (!(await stat(source)).isDirectory()) throw new Error("not-directory");
-    const manifest = JSON.parse(await readFile(join(source, "package.json"), "utf8")) as { name?: string };
-    if (manifest.name !== "@dsh-skin/dsh-plugin") throw new Error("wrong-package");
-    if (!(await stat(join(source, "dist", "host", "index.js"))).isFile()) throw new Error("missing-host");
-  } catch { throw new AppError(ERROR_CODES.unavailable, "DSH_SKIN_PLUGIN_SOURCE does not contain a built managed plugin", 503); }
-  return source;
+  const candidates = pluginSourceCandidates();
+  for (const source of candidates) {
+    try {
+      if (!(await stat(source)).isDirectory()) continue;
+      const manifest = JSON.parse(await readFile(join(source, "package.json"), "utf8")) as { name?: string };
+      if (manifest.name !== "@dsh-skin/dsh-plugin") continue;
+      if (!(await stat(join(source, "dist", "host", "index.js"))).isFile()) continue;
+      return source;
+    } catch { continue; }
+  }
+  throw new AppError(ERROR_CODES.unavailable, "DSH_SKIN_PLUGIN_SOURCE does not contain a built managed plugin", 503);
 }

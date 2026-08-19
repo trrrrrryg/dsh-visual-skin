@@ -1,5 +1,11 @@
 # Change notes
 
+## 2026-08-19 — Fix isolated preview in installed runtime (plugin source resolution)
+
+- **Root cause**: after moving to the portable installed runtime, `resolvePluginSource()` defaulted to `<projectRoot>/packages/dsh-plugin`, where `projectRoot` resolves from the dist module as `<runtime>/node_modules` — the embedded plugin actually lives at `<runtime>/plugin` (sibling of `node_modules`). Every isolated preview then failed at provisioning with `DSH_SKIN_PLUGIN_SOURCE does not contain a built managed plugin`, so Studio showed "隔离预览未能建立" and no design could be previewed.
+- **Fix**: plugin source resolution now probes candidates in order — explicit `DSH_SKIN_PLUGIN_SOURCE` (if set), then the source-checkout path, then the installed-runtime embedded `<runtime>/plugin` path — validating package name and `dist/host/index.js` for each.
+- Verified: with the runtime-installed Controller, an isolated preview now reaches `awaiting-render` and Studio reaches live with the real design rendered in the iframe.
+
 ## 2026-08-19 — Settings card auto-starts the Studio Controller when down
 
 - **Root cause**: the DSH settings card's "启动并打开 Skin Studio" link redirects to the Controller (`http://127.0.0.1:11862`). The Controller is a separate process the installer starts once; after a reboot or a crash it stays down, so the card produced "无法访问此页面" with no recovery path.
