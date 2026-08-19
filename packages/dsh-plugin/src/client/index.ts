@@ -102,6 +102,7 @@ export const inject = ["theme", "slots"] as const;
  */
 export function apply(ctx: ClientContextLike): void {
   installSkinSettingsCard(ctx);
+  installQuotaSettingsCard(ctx);
   const themeRuntime = ctx.theme ?? ctx.get?.("theme") as ThemeRuntimeLike | undefined;
   if (!themeRuntime?.overrideTokens || typeof ctx.effect !== "function") {
     document.documentElement.dataset.dshSkinStatus = "blocked";
@@ -296,8 +297,6 @@ export function apply(ctx: ClientContextLike): void {
       if (lastRendered) notifyParent(lastRendered, clientInstanceId, parentOrigin);
     };
     addEventListener("message", onParentHello);
-    const balanceChip = installBalanceChip();
-    const sidebarBalanceButton = installSidebarBalanceButton();
     const maskAccelerator = installConversationMaskAccelerator(() => {
       const theme = lastRendered?.theme;
       if (!theme) return null;
@@ -315,8 +314,6 @@ export function apply(ctx: ClientContextLike): void {
       removeEventListener("message", onParentHello);
       layoutObserver.disconnect();
       maskAccelerator.dispose();
-      balanceChip.dispose();
-      sidebarBalanceButton.dispose();
       controller?.abort();
       if (timer !== undefined) clearTimeout(timer);
       if (remountTimer !== undefined) clearTimeout(remountTimer);
@@ -1012,9 +1009,9 @@ function isRegionalLayoutNode(node: Node, owned?: RegionalBackdrop): boolean {
 }
 
 /**
- * Shared balance state: one localStorage cache, one query helper, and a
- * window event so every surface (composer chip, sidebar button) stays in sync.
- * The API key never leaves the Host route.
+ * Shared balance state: one localStorage cache and one query helper so the
+ * 额度查看 settings card paints the last known amount instantly and refreshes
+ * in place. The API key never leaves the Host route.
  */
 type BalanceValue = { currency: string; total: string; granted: string; toppedUp: string };
 const BALANCE_STORAGE_KEY = "dsh-skin-balance:v1";
@@ -1045,9 +1042,6 @@ async function fetchBalanceValue(refresh: boolean, signal?: AbortSignal): Promis
     if (payload.ok !== true || typeof payload.total !== "string") return null;
     return { currency: typeof payload.currency === "string" ? payload.currency : "CNY", total: payload.total, granted: typeof payload.granted === "string" ? payload.granted : "0", toppedUp: typeof payload.toppedUp === "string" ? payload.toppedUp : "0" };
   } catch { return null; }
-}
-function announceBalance(value: BalanceValue): void {
-  try { window.dispatchEvent(new CustomEvent("dsh-skin-balance", { detail: value })); } catch { /* no listeners */ }
 }
 function persistentBaseActive(): boolean { return document.getElementById("dsh-skin-persistent") !== null; }
 
@@ -1174,201 +1168,6 @@ function installConversationMaskAccelerator(getMaskValue: () => { value: string;
   };
 }
 
-/**
- * Persistent composer balance chip. Two capability-pinned hosts:
- * - conversation view: the detail dock `div.FJxK0a_root` (the "对话详细数据"
- *   row, which re-renders on every turn);
- * - hero and any view without a dock: the composer trailing row
- *   `div.uV2eYG_trailing` (beside the model selector).
- * The chip is moved between hosts by a lightweight observer, keeps its last
- * value in localStorage so a reload paints the balance immediately, and
- * click/Enter/Space forces a refresh. The amount comes from the same-origin
- * Host route; the API key never leaves the Host.
- */
-function installBalanceChip(): { dispose(): void } {
-  const DOCK_SELECTOR = "div.FJxK0a_root";
-  const TRAILING_SELECTOR = "div.uV2eYG_trailing";
-  const style = document.createElement("style");
-  style.dataset.dshSkinBalanceStyle = "1";
-  style.textContent = "[data-dsh-skin-balance]{cursor:pointer;user-select:none;color:var(--dsw-alias-label-tertiary)}[data-dsh-skin-balance]:hover,[data-dsh-skin-balance]:focus-visible{color:var(--dsw-alias-label-primary)}[data-dsh-skin-balance][data-dsh-skin-balance-busy]{opacity:.55;pointer-events:none}";
-  document.head.append(style);
-  let chip: HTMLSpanElement | null = null;
-  let dockHost: HTMLElement | null = null;
-  let balance: { currency: string; total: string; granted: string; toppedUp: string } | null | undefined;
-  let busy = false;
-  let queried = false;
-  let controller: AbortController | undefined;
-  let seq = 0;
-  let observer: MutationObserver | undefined;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let stopped = false;
-  balance = readStoredBalance();
-  const setBusy = (next: boolean) => { if (chip) chip.toggleAttribute("data-dsh-skin-balance-busy", next); };
-  const query = async (refresh: boolean) => {
-    if (busy) return;
-    const current = ++seq;
-    busy = true;
-    setBusy(true);
-    controller?.abort();
-    controller = new AbortController();
-    try {
-      const value = await fetchBalanceValue(refresh, controller.signal);
-      if (current !== seq) return;
-      if (value) { balance = value; writeStoredBalance(balance); announceBalance(balance); }
-      else if (balance === undefined) balance = null;
-    } catch (error) {
-      if (current === seq && !(error instanceof DOMException && error.name === "AbortError")) balance = null;
-    } finally {
-      if (current === seq) { busy = false; setBusy(false); }
-      render();
-    }
-  };
-  const onBalanceEvent = (event: Event) => {
-    const value = (event as CustomEvent<BalanceValue>).detail;
-    if (value) { balance = value; render(); }
-  };
-  const render = () => {
-    if (!chip) return;
-    if (balance === undefined) { chip.textContent = "余额 · …"; chip.title = "正在查询余额"; return; }
-    if (balance === null) { chip.textContent = "余额 · –"; chip.title = "余额查询失败，点击重试"; return; }
-    const symbol = balanceSymbol(balance.currency);
-    chip.textContent = `余额 · ${symbol}${formatBalance(balance.total)}`;
-    chip.title = `已充值 ${symbol}${formatBalance(balance.toppedUp)} · 赠送 ${symbol}${formatBalance(balance.granted)} · 点击刷新`;
-  };
-  const mount = () => {
-    const dock = document.querySelector<HTMLElement>(DOCK_SELECTOR);
-    const trailing = document.querySelector<HTMLElement>(TRAILING_SELECTOR);
-    const host = dock ?? trailing;
-    if (!host || host === dockHost) return;
-    dockHost = host;
-    chip?.remove();
-    chip = document.createElement("span");
-    chip.dataset.dshSkinBalance = "1";
-    chip.setAttribute("role", "button");
-    chip.tabIndex = 0;
-    chip.addEventListener("click", () => void query(true));
-    chip.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); void query(true); } });
-    const sep = document.createElement("span");
-    sep.className = "FJxK0a_sep";
-    sep.setAttribute("aria-hidden", "true");
-    sep.textContent = "|";
-    host.append(sep, chip);
-    render();
-    if (!queried) { queried = true; void query(false); }
-  };
-  const remountIfMissing = () => {
-    if (stopped) return;
-    const dock = document.querySelector<HTMLElement>(DOCK_SELECTOR);
-    const trailing = document.querySelector<HTMLElement>(TRAILING_SELECTOR);
-    const preferred = dock ?? trailing;
-    if (!preferred) { if (chip) { chip.remove(); chip = null; } return; }
-    if (!chip || !chip.isConnected || preferred !== dockHost) {
-      if (timer !== undefined) { clearTimeout(timer); timer = undefined; }
-      timer = setTimeout(() => { timer = undefined; mount(); }, 120);
-    }
-  };
-  observer = new MutationObserver((records) => {
-    const relevant = records.some((record) => record.type === "childList" && [...record.addedNodes, ...record.removedNodes].some((node) => node instanceof Element && (node.matches(`${DOCK_SELECTOR},${TRAILING_SELECTOR},[data-dsh-skin-balance]`) || Boolean(node.querySelector(`${DOCK_SELECTOR},${TRAILING_SELECTOR}`)))));
-    if (relevant) remountIfMissing();
-  });
-  observer.observe(document.documentElement, { childList: true, subtree: true });
-  window.addEventListener("dsh-skin-balance", onBalanceEvent);
-  mount();
-  return {
-    dispose: () => {
-      stopped = true;
-      observer?.disconnect();
-      if (timer !== undefined) clearTimeout(timer);
-      controller?.abort();
-      window.removeEventListener("dsh-skin-balance", onBalanceEvent);
-      chip?.remove();
-      style.remove();
-    }
-  };
-}
-
-/**
- * Sidebar balance button, mounted above the native 设置 trigger inside
- * `hHd-Xa_settingsArea`. It shares the localStorage cache and the
- * `dsh-skin-balance` event with the composer chip; click forces a refresh.
- */
-function installSidebarBalanceButton(): { dispose(): void } {
-  const SETTINGS_AREA_SELECTOR = "div.hHd-Xa_settingsArea";
-  let button: HTMLButtonElement | null = null;
-  let mountedArea: HTMLElement | null = null;
-  let balance: BalanceValue | null | undefined;
-  let busy = false;
-  let queried = false;
-  let controller: AbortController | undefined;
-  let observer: MutationObserver | undefined;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let stopped = false;
-  const render = () => {
-    if (!button) return;
-    if (balance === undefined) { button.textContent = "余额 · …"; button.title = "正在查询余额"; return; }
-    if (balance === null) { button.textContent = "余额 · ?"; button.title = "余额查询失败，点击重试"; return; }
-    const symbol = balanceSymbol(balance.currency);
-    button.textContent = `余额 ${symbol}${formatBalance(balance.total)}`;
-    button.title = `已充值 ${symbol}${formatBalance(balance.toppedUp)} · 赠送 ${symbol}${formatBalance(balance.granted)} · 点击刷新`;
-  };
-  const query = async (refresh: boolean) => {
-    if (busy) return;
-    busy = true;
-    if (button) button.disabled = true;
-    controller?.abort();
-    controller = new AbortController();
-    const value = await fetchBalanceValue(refresh, controller.signal);
-    if (value) { balance = value; writeStoredBalance(balance); announceBalance(balance); }
-    else if (balance === undefined) balance = null;
-    busy = false;
-    if (button) button.disabled = false;
-    render();
-  };
-  const mount = () => {
-    const area = document.querySelector<HTMLElement>(SETTINGS_AREA_SELECTOR);
-    if (!area || area === mountedArea) return;
-    mountedArea = area;
-    button?.remove();
-    button = document.createElement("button");
-    button.type = "button";
-    button.dataset.dshSkinBalanceButton = "1";
-    button.style.cssText = "display:flex;align-items:center;justify-content:center;width:100%;border:0;border-radius:8px;padding:7px 12px;margin:0 0 6px;background:transparent;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:13px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis";
-    button.addEventListener("click", () => void query(true));
-    area.prepend(button);
-    balance = readStoredBalance();
-    render();
-    if (!queried) { queried = true; void query(false); }
-  };
-  const remountIfMissing = () => {
-    if (stopped) return;
-    if (!button || !button.isConnected) {
-      if (timer !== undefined) { clearTimeout(timer); timer = undefined; }
-      timer = setTimeout(() => { timer = undefined; mount(); }, 120);
-    }
-  };
-  const onBalanceEvent = (event: Event) => {
-    const value = (event as CustomEvent<BalanceValue>).detail;
-    if (value) { balance = value; render(); }
-  };
-  observer = new MutationObserver((records) => {
-    const relevant = records.some((record) => record.type === "childList" && [...record.addedNodes, ...record.removedNodes].some((node) => node instanceof Element && (node.matches(`${SETTINGS_AREA_SELECTOR},[data-dsh-skin-balance-button]`) || Boolean(node.querySelector(SETTINGS_AREA_SELECTOR)))));
-    if (relevant) remountIfMissing();
-  });
-  observer.observe(document.documentElement, { childList: true, subtree: true });
-  window.addEventListener("dsh-skin-balance", onBalanceEvent);
-  mount();
-  return {
-    dispose: () => {
-      stopped = true;
-      observer?.disconnect();
-      if (timer !== undefined) clearTimeout(timer);
-      controller?.abort();
-      window.removeEventListener("dsh-skin-balance", onBalanceEvent);
-      button?.remove();
-    }
-  };
-}
-
 function installSkinSettingsCard(ctx: ClientContextLike): void {
   const slots = ctx.slots ?? ctx.get?.("slots") as SlotsLike | undefined;
   if (!slots || typeof slots.inject !== "function" || typeof slots.register !== "function") return;
@@ -1420,6 +1219,241 @@ function installSkinSettingsCard(ctx: ClientContextLike): void {
     ] });
   };
   slots.inject("settings.plugin.item", () => slots.register({ name: "settings.plugin.item", id: "dsh-skin-studio", order: 30, label: "皮肤设置", registrant: "@dsh-skin/dsh-plugin" }, card));
+}
+
+interface QuotaDayView { date: string; inputTokens: number; outputTokens: number; cacheReadTokens: number; reasoningTokens: number; cost: number; requests: number }
+interface QuotaUsagePayload { ok?: boolean; month?: string; today?: QuotaDayView; monthTotal?: QuotaDayView; days?: QuotaDayView[]; estimated?: boolean; queriedAt?: string }
+interface QuotaCell { date: string; day: number; usage: QuotaDayView | null; future: boolean }
+
+function quotaTotalTokens(day: QuotaDayView | undefined): number {
+  if (!day) return 0;
+  return (day.inputTokens ?? 0) + (day.outputTokens ?? 0) + (day.cacheReadTokens ?? 0);
+}
+function quotaMonthKey(date?: Date): string {
+  const value = date ?? new Date();
+  return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}`;
+}
+function quotaDayKey(date?: Date): string {
+  const value = date ?? new Date();
+  return `${quotaMonthKey(value)}-${String(value.getDate()).padStart(2, "0")}`;
+}
+function quotaMonthLabel(key: string): string {
+  const match = /^(\d{4})-(\d{2})$/.exec(key);
+  return match ? `${match[1]}年${Number(match[2])}月` : key;
+}
+function quotaFormatTokens(value: number): string {
+  const n = Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+  return n.toLocaleString("zh-CN");
+}
+function quotaFormatCost(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "¥0";
+  if (value >= 100) return `¥${value.toFixed(2)}`;
+  return `¥${value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "")}`;
+}
+/** Monday-first calendar cells for one month; leading blanks align weekdays. */
+function quotaMonthCells(month: string, days: QuotaDayView[] | undefined, todayKey: string): (QuotaCell | null)[] {
+  const match = /^(\d{4})-(\d{2})$/.exec(month);
+  if (!match) return [];
+  const year = Number(match[1]);
+  const monthIndex = Number(match[2]) - 1;
+  if (monthIndex < 0 || monthIndex > 11) return [];
+  const leading = (new Date(year, monthIndex, 1).getDay() + 6) % 7;
+  const daysInMonth = new Date(year, monthIndex + 1, 0).getDate();
+  const byDate = new Map<string, QuotaDayView>();
+  for (const day of days ?? []) if (day && typeof day.date === "string") byDate.set(day.date, day);
+  const cells: (QuotaCell | null)[] = [];
+  for (let i = 0; i < leading; i += 1) cells.push(null);
+  for (let day = 1; day <= daysInMonth; day += 1) {
+    const date = `${month}-${String(day).padStart(2, "0")}`;
+    cells.push({ date, day, usage: byDate.get(date) ?? null, future: date > todayKey });
+  }
+  return cells;
+}
+
+/**
+ * 额度查看 settings card — the single balance/usage surface since the
+ * composer chip and sidebar button were removed. Shows the current balance,
+ * today's consumed quota (estimated ¥) and tokens, this month's tokens, and a
+ * day grid (gray = no usage, blue = used; hover shows the day's quota/tokens).
+ */
+function installQuotaSettingsCard(ctx: ClientContextLike): void {
+  const slots = ctx.slots ?? ctx.get?.("slots") as SlotsLike | undefined;
+  if (!slots || typeof slots.inject !== "function" || typeof slots.register !== "function") return;
+  let jsx: ReactJsxRuntimeLike;
+  let react: {
+    useState: <T>(init: T | (() => T)) => [T, (next: T | ((prev: T) => T)) => void];
+    useEffect: (effect: () => void | (() => void), deps?: unknown[]) => void;
+  };
+  try {
+    jsx = require("react/jsx-runtime") as ReactJsxRuntimeLike;
+    react = require("react") as typeof react;
+  } catch {
+    return;
+  }
+  const card = (_props: unknown): unknown => {
+    const [balance, setBalance] = react.useState<BalanceValue | null | undefined>(readStoredBalance());
+    const [balanceFailed, setBalanceFailed] = react.useState(false);
+    const [usage, setUsage] = react.useState<QuotaUsagePayload | null>(null);
+    const [usageFailed, setUsageFailed] = react.useState(false);
+    const [month, setMonth] = react.useState(quotaMonthKey());
+    const [hover, setHover] = react.useState<{ x: number; y: number; cell: QuotaCell } | null>(null);
+    const [refreshing, setRefreshing] = react.useState(false);
+    const todayKey = quotaDayKey();
+    const loadUsage = (targetMonth: string) => {
+      setUsageFailed(false);
+      fetch(`/dsh-skin/usage?month=${encodeURIComponent(targetMonth)}`, { credentials: "same-origin", cache: "no-store" })
+        .then((response) => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.json() as Promise<QuotaUsagePayload>; })
+        .then((payload) => { if (payload && payload.ok === true) setUsage(payload); else setUsageFailed(true); })
+        .catch(() => setUsageFailed(true));
+    };
+    react.useEffect(() => {
+      let cancelled = false;
+      setUsage(null);
+      setUsageFailed(false);
+      fetch(`/dsh-skin/usage?month=${encodeURIComponent(month)}`, { credentials: "same-origin", cache: "no-store" })
+        .then((response) => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.json() as Promise<QuotaUsagePayload>; })
+        .then((payload) => { if (cancelled) return; if (payload && payload.ok === true) setUsage(payload); else setUsageFailed(true); })
+        .catch(() => { if (!cancelled) setUsageFailed(true); });
+      return () => { cancelled = true; };
+    }, [month]);
+    react.useEffect(() => {
+      let cancelled = false;
+      fetchBalanceValue(false).then((value) => {
+        if (cancelled) return;
+        if (value) { setBalance(value); setBalanceFailed(false); writeStoredBalance(value); }
+        else setBalanceFailed(true);
+      });
+      return () => { cancelled = true; };
+    }, []);
+    const refresh = () => {
+      setRefreshing(true);
+      fetchBalanceValue(true).then((value) => {
+        if (value) { setBalance(value); setBalanceFailed(false); writeStoredBalance(value); }
+        else setBalanceFailed(true);
+      });
+      loadUsage(month);
+      window.setTimeout(() => setRefreshing(false), 600);
+    };
+    const changeMonth = (delta: number) => {
+      setMonth((prev) => {
+        const match = /^(\d{4})-(\d{2})$/.exec(prev);
+        if (!match) return prev;
+        const next = quotaMonthKey(new Date(Number(match[1]), Number(match[2]) - 1 + delta, 1));
+        return next > quotaMonthKey() ? prev : next;
+      });
+    };
+    const balanceValue = balance ?? null;
+    const balanceText = balanceValue === null ? "查询失败" : `${balanceSymbol(balanceValue.currency)}${formatBalance(balanceValue.total)}`;
+    const balanceDetail = balanceValue
+      ? `已充值 ${balanceSymbol(balanceValue.currency)}${formatBalance(balanceValue.toppedUp)} · 赠送 ${balanceSymbol(balanceValue.currency)}${formatBalance(balanceValue.granted)}${balanceFailed ? " · 余额刷新失败" : ""}`
+      : balanceFailed ? "余额查询失败，点击右上角刷新重试" : "正在查询余额…";
+    const today = usage?.today;
+    const monthTotal = usage?.monthTotal;
+    const todayCost = today?.cost ?? 0;
+    const todayTokens = quotaTotalTokens(today);
+    const monthTokens = quotaTotalTokens(monthTotal);
+    const cells = quotaMonthCells(month, usage?.days, todayKey);
+    const monthHasUsage = (monthTotal?.requests ?? 0) > 0;
+    const cardStyle = { border: "1px solid var(--dsw-alias-border-l2)", background: "var(--dsw-alias-bg-layer-3)", borderRadius: "12px", listStyle: "none", padding: "16px" };
+    const titleStyle = { color: "var(--dsw-alias-label-primary)", fontSize: "15px", fontWeight: 600, lineHeight: 1.4 };
+    const descriptionStyle = { color: "var(--dsw-alias-label-tertiary)", fontSize: "13px", lineHeight: 1.5, marginTop: "4px" };
+    const statBlock = (label: string, value: string) => jsx.jsxs("div", { style: { border: "1px solid var(--dsw-alias-border-l1)", background: "var(--dsw-alias-bg-layer-2)", borderRadius: "10px", padding: "10px" }, children: [
+      jsx.jsx("div", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: "11px", lineHeight: 1.4 }, children: label }),
+      jsx.jsx("div", { style: { color: "var(--dsw-alias-label-primary)", fontSize: "15px", fontWeight: 600, marginTop: "4px", fontVariantNumeric: "tabular-nums" }, children: value })
+    ] });
+    const monthNav = (label: string, delta: number) => jsx.jsx("button", {
+      type: "button",
+      onClick: () => changeMonth(delta),
+      style: { border: "0", borderRadius: "6px", padding: "2px 8px", background: "transparent", color: "var(--dsw-alias-label-secondary)", font: "inherit", fontSize: "13px", lineHeight: 1.6, cursor: "pointer" },
+      children: label
+    });
+    const legendItem = (color: string, label: string) => jsx.jsxs("span", { style: { display: "inline-flex", alignItems: "center", gap: "4px" }, children: [
+      jsx.jsx("span", { style: { width: "10px", height: "10px", borderRadius: "3px", background: color, display: "inline-block" } }),
+      jsx.jsx("span", { children: label })
+    ] });
+    return jsx.jsxs("li", { style: cardStyle, "data-dsh-skin-quota-card": "1", children: [
+      jsx.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between" }, children: [
+        jsx.jsx("div", { style: titleStyle, children: "额度查看" }),
+        jsx.jsx("button", { type: "button", onClick: refresh, style: { border: "0", borderRadius: "8px", padding: "5px 12px", color: "var(--dsw-alias-label-secondary)", background: "var(--dsw-alias-bg-layer-2)", font: "inherit", fontSize: "12px", cursor: "pointer" }, children: refreshing ? "刷新中…" : "刷新" })
+      ] }),
+      jsx.jsx("div", { style: { display: "flex", alignItems: "baseline", gap: "8px", marginTop: "12px" }, children: [
+        jsx.jsx("span", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: "12px" }, children: "当前余额" }),
+        jsx.jsx("span", { style: { color: "var(--dsw-alias-label-primary)", fontSize: "22px", fontWeight: 700, fontVariantNumeric: "tabular-nums" }, children: balanceText })
+      ] }),
+      jsx.jsx("div", { style: descriptionStyle, children: balanceDetail }),
+      jsx.jsxs("div", { style: { display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "8px", marginTop: "14px" }, children: [
+        statBlock("今日消耗额度", quotaFormatCost(todayCost)),
+        statBlock("今日消耗 Token", quotaFormatTokens(todayTokens)),
+        statBlock("本月消耗 Token", quotaFormatTokens(monthTokens))
+      ] }),
+      jsx.jsxs("div", { style: { marginTop: "16px" }, children: [
+        jsx.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between" }, children: [
+          jsx.jsx("div", { style: { color: "var(--dsw-alias-label-primary)", fontSize: "13px", fontWeight: 600 }, children: "本月消耗 Token" }),
+          jsx.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "2px" }, children: [
+            monthNav("‹", -1),
+            jsx.jsx("span", { style: { color: "var(--dsw-alias-label-secondary)", fontSize: "12px", minWidth: "78px", textAlign: "center", fontVariantNumeric: "tabular-nums" }, children: quotaMonthLabel(month) }),
+            monthNav("›", 1)
+          ] })
+        ] }),
+        jsx.jsxs("div", { style: { display: "flex", gap: "4px", marginTop: "10px" }, children: ["一", "二", "三", "四", "五", "六", "日"].map((weekday) => jsx.jsx("div", { style: { width: "26px", textAlign: "center", color: "var(--dsw-alias-label-caption)", fontSize: "11px", lineHeight: "20px" }, children: weekday })) }),
+        usageFailed
+          ? jsx.jsx("div", { style: { ...descriptionStyle, marginTop: "10px" }, children: "用量数据暂不可用（服务未就绪，可能需要重启 DSH）" })
+          : usage === null
+            ? jsx.jsx("div", { style: { ...descriptionStyle, marginTop: "10px" }, children: "正在加载用量数据…" })
+            : jsx.jsxs("div", { style: { display: "flex", flexWrap: "wrap", gap: "4px", marginTop: "2px" }, children: cells.map((cell) => {
+              if (!cell) return jsx.jsx("div", { style: { width: "26px", height: "26px" } });
+              const used = cell.usage !== null;
+              const cellStyle = used
+                ? { background: "var(--dsw-alias-brand-primary, #2e7cf6)", color: "#fff" }
+                : cell.future
+                  ? { background: "transparent", color: "var(--dsw-alias-label-caption)", border: "1px dashed var(--dsw-alias-border-l1)" }
+                  : { background: "var(--dsw-alias-bg-layer-2, rgba(128,128,128,.18))", color: "var(--dsw-alias-label-tertiary)" };
+              return jsx.jsx("div", {
+                onMouseEnter: (event: { clientX: number; clientY: number }) => { if (!cell.future) setHover({ x: event.clientX, y: event.clientY, cell }); },
+                onMouseMove: (event: { clientX: number; clientY: number }) => { if (hover && hover.cell.date === cell.date) setHover({ x: event.clientX, y: event.clientY, cell }); },
+                onMouseLeave: () => setHover((prev) => (prev && prev.cell.date === cell.date ? null : prev)),
+                style: { width: "26px", height: "26px", borderRadius: "7px", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "11px", lineHeight: 1, cursor: cell.future ? "default" : "pointer", fontVariantNumeric: "tabular-nums", ...cellStyle },
+                children: cell.day
+              });
+            }) }),
+        monthHasUsage
+          ? jsx.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "10px", marginTop: "10px", color: "var(--dsw-alias-label-caption)", fontSize: "11px", lineHeight: 1.5 }, children: [
+            legendItem("var(--dsw-alias-bg-layer-2, rgba(128,128,128,.18))", "无消耗"),
+            legendItem("var(--dsw-alias-brand-primary, #2e7cf6)", "有消耗"),
+            jsx.jsx("span", { children: "悬停查看当日详情 · 额度为按模型单价估算" })
+          ] })
+          : null
+      ] }),
+      hover ? jsx.jsx("div", {
+        style: {
+          position: "fixed",
+          left: Math.max(8, Math.min(hover.x + 14, window.innerWidth - 260)),
+          top: Math.max(8, Math.min(hover.y + 16, window.innerHeight - 130)),
+          zIndex: 9999,
+          pointerEvents: "none",
+          background: "var(--dsw-alias-tooltip-bg, rgba(24,24,27,.95))",
+          color: "var(--dsw-alias-label-primary)",
+          borderRadius: "10px",
+          padding: "8px 12px",
+          fontSize: "12px",
+          lineHeight: 1.6,
+          boxShadow: "0 6px 24px rgba(0,0,0,.28)",
+          whiteSpace: "nowrap"
+        },
+        children: [
+          jsx.jsx("div", { style: { fontWeight: 600 }, children: `${quotaMonthLabel(hover.cell.date.slice(0, 7))}${Number(hover.cell.date.slice(8, 10))}日` }),
+          hover.cell.usage
+            ? jsx.jsxs("div", { children: [
+                jsx.jsx("div", { children: `额度 ${quotaFormatCost(hover.cell.usage.cost)}` }),
+                jsx.jsx("div", { children: `Token ${quotaFormatTokens(quotaTotalTokens(hover.cell.usage))}` }),
+                jsx.jsx("div", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: "11px" }, children: `请求 ${hover.cell.usage.requests} 次 · 输入 ${quotaFormatTokens(hover.cell.usage.inputTokens)} / 输出 ${quotaFormatTokens(hover.cell.usage.outputTokens)}` })
+              ] })
+            : jsx.jsx("div", { children: "当日无消耗" })
+        ]
+      }) : null
+    ] });
+  };
+  slots.inject("settings.plugin.item", () => slots.register({ name: "settings.plugin.item", id: "dsh-skin-quota", order: 20, label: "额度查看", registrant: "@dsh-skin/dsh-plugin" }, card));
 }
 
 function ReactLikeState<T>(initial: T, react: { useState: <S>(init: S | (() => S)) => [S, (next: S) => void] }): [T, (next: T) => void] {

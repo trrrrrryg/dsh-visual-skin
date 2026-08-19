@@ -13,7 +13,19 @@ interface ThemeDocument { designId: string; revision: number; hash: string; them
 interface PreviewSession extends ThemeDocument { expiresAt: string; sessionId?: string; generation?: number }
 interface RenderReceipt { mode: "stable" | "preview"; designId: string; revision: number; hash: string; pluginInstanceId: string; clientInstanceId: string; sessionId?: string; generation?: number }
 
-export interface Config { profile?: string; themeFile?: string; assetDir?: string; controllerUrl?: string; pluginSecret?: string; previewSessionId?: string; controllerEntry?: string; dataDir?: string }
+export interface UsagePrice { input?: number; cacheRead?: number; output?: number }
+export interface UsageConfig { file?: string; prices?: Record<string, UsagePrice> }
+export interface Config {
+  profile?: string;
+  themeFile?: string;
+  assetDir?: string;
+  controllerUrl?: string;
+  pluginSecret?: string;
+  previewSessionId?: string;
+  controllerEntry?: string;
+  dataDir?: string;
+  usage?: UsageConfig;
+}
 export const inject = ["webServer"];
 // Must match the Controller's bounded background-asset storage ceiling.
 const MAX_BACKGROUND_ASSET_BYTES = 4 * 1024 * 1024;
@@ -61,6 +73,201 @@ export interface UpdateStatus {
   checkedAt?: string;
   error?: { code: string; message: string };
 }
+
+/**
+ * Per-day usage ledger. Every provider stream reports its exact token usage
+ * through the `usage` chunk (`inputTokens`/`outputTokens` disjoint counts plus
+ * optional cache reads and reasoning), so the token numbers are exact while
+ * the monetary "额度" is a local estimate computed from a per-model price
+ * table (CNY per 1M tokens). The ledger is persisted as JSON in the plugin
+ * data dir and survives restarts.
+ */
+export interface DayUsage {
+  date: string; // "YYYY-MM-DD" in local time
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  reasoningTokens: number;
+  cost: number; // estimated CNY
+  requests: number;
+}
+export interface UsageStore { version: 1; days: Record<string, DayUsage> }
+
+// DeepSeek's published CNY pricing (per 1M tokens) as sensible defaults; any
+// entry can be overridden through `config.usage.prices` and unknown models
+// fall back to the `*` entry, so estimates stay configurable.
+const DEFAULT_USAGE_PRICES: Record<string, Required<UsagePrice>> = {
+  "deepseek-v4-flash": { input: 1, cacheRead: 0.2, output: 2 },
+  "deepseek-v4-pro": { input: 2, cacheRead: 0.5, output: 8 },
+  "deepseek-chat": { input: 1, cacheRead: 0.2, output: 2 },
+  "deepseek-reasoner": { input: 2, cacheRead: 0.5, output: 8 },
+  "*": { input: 1, cacheRead: 0.2, output: 2 }
+};
+const USAGE_STORE_VERSION = 1 as const;
+const USAGE_WRITE_DEBOUNCE_MS = 2_000;
+
+export function localDateKey(date = new Date()): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+export function localMonthKey(date = new Date()): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
+export function resolvePriceTable(config: Config): Record<string, Required<UsagePrice>> {
+  const table: Record<string, Required<UsagePrice>> = {};
+  for (const [model, price] of Object.entries(DEFAULT_USAGE_PRICES)) table[model] = { ...price };
+  for (const [model, price] of Object.entries(config.usage?.prices ?? {})) {
+    const base = table[model] ?? table["*"] ?? DEFAULT_USAGE_PRICES["*"]!;
+    table[model] = {
+      input: finiteNonNegative(price.input) ? price.input! : base.input,
+      cacheRead: finiteNonNegative(price.cacheRead) ? price.cacheRead! : base.cacheRead,
+      output: finiteNonNegative(price.output) ? price.output! : base.output
+    };
+  }
+  return table;
+}
+function finiteNonNegative(value: unknown): value is number { return typeof value === "number" && Number.isFinite(value) && value >= 0; }
+export function priceForModel(table: Record<string, Required<UsagePrice>>, model: string): Required<UsagePrice> {
+  return table[model] ?? table["*"] ?? DEFAULT_USAGE_PRICES["*"]!;
+}
+/** Estimated CNY cost for one call's disjoint token counts. */
+export function computeCost(usage: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number }, price: Required<UsagePrice>): number {
+  const input = finiteNonNegative(usage.inputTokens) ? usage.inputTokens : 0;
+  const output = finiteNonNegative(usage.outputTokens) ? usage.outputTokens : 0;
+  const cacheRead = finiteNonNegative(usage.cacheReadTokens) ? usage.cacheReadTokens : 0;
+  return (input * price.input + cacheRead * price.cacheRead + output * price.output) / 1_000_000;
+}
+export function totalTokens(day: Pick<DayUsage, "inputTokens" | "outputTokens" | "cacheReadTokens">): number {
+  return day.inputTokens + day.outputTokens + day.cacheReadTokens;
+}
+export function emptyDay(date: string): DayUsage {
+  return { date, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, reasoningTokens: 0, cost: 0, requests: 0 };
+}
+export function mergeDays(target: DayUsage, other: DayUsage): DayUsage {
+  target.inputTokens += other.inputTokens;
+  target.outputTokens += other.outputTokens;
+  target.cacheReadTokens += other.cacheReadTokens;
+  target.reasoningTokens += other.reasoningTokens;
+  target.cost += other.cost;
+  target.requests += other.requests;
+  return target;
+}
+
+/**
+ * Process-scoped ledger singleton per usage file. Records are accumulated in
+ * memory and persisted atomically on a short debounce so frequent LLM streams
+ * never cause a write per chunk; the flush on dispose covers shutdown.
+ */
+export class UsageRecorder {
+  readonly file: string;
+  private store: UsageStore;
+  private writeTimer: ReturnType<typeof setTimeout> | undefined;
+  private writing: Promise<void> | undefined;
+
+  constructor(file: string) {
+    this.file = file;
+    this.store = loadUsageStore(file);
+  }
+
+  record(usage: { inputTokens?: unknown; outputTokens?: unknown; cacheReadTokens?: unknown; reasoningTokens?: unknown }, model: string, prices: Record<string, Required<UsagePrice>>): void {
+    const input = finiteNonNegative(usage.inputTokens) ? usage.inputTokens : 0;
+    const output = finiteNonNegative(usage.outputTokens) ? usage.outputTokens : 0;
+    const cacheRead = finiteNonNegative(usage.cacheReadTokens) ? usage.cacheReadTokens : 0;
+    const reasoning = finiteNonNegative(usage.reasoningTokens) ? usage.reasoningTokens : 0;
+    if (input === 0 && output === 0 && cacheRead === 0) return;
+    const date = localDateKey();
+    const day = this.store.days[date] ?? emptyDay(date);
+    day.inputTokens += input;
+    day.outputTokens += output;
+    day.cacheReadTokens += cacheRead;
+    day.reasoningTokens += reasoning;
+    day.cost += computeCost({ inputTokens: input, outputTokens: output, cacheReadTokens: cacheRead }, priceForModel(prices, model));
+    day.requests += 1;
+    this.store.days[date] = day;
+    this.scheduleWrite();
+  }
+
+  /** Days with recorded usage inside one "YYYY-MM" month, ascending. */
+  daysForMonth(month: string): DayUsage[] {
+    const prefix = `${month}-`;
+    return Object.values(this.store.days)
+      .filter((day) => day.date.startsWith(prefix))
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .map((day) => ({ ...day }));
+  }
+
+  /** Aggregate one day; a zero record is returned when the day has no data. */
+  daySummary(date: string): DayUsage {
+    const day = this.store.days[date];
+    return day ? { ...day } : emptyDay(date);
+  }
+
+  flush(): Promise<void> {
+    this.cancelWrite();
+    return this.persistNow();
+  }
+
+  private scheduleWrite(): void {
+    if (this.writeTimer !== undefined) return;
+    this.writeTimer = setTimeout(() => {
+      this.writeTimer = undefined;
+      void this.persistNow();
+    }, USAGE_WRITE_DEBOUNCE_MS);
+  }
+  private cancelWrite(): void {
+    if (this.writeTimer !== undefined) { clearTimeout(this.writeTimer); this.writeTimer = undefined; }
+  }
+  private persistNow(): Promise<void> {
+    const snapshot = JSON.stringify(this.store);
+    const write = async () => {
+      try {
+        const tmp = `${this.file}.tmp`;
+        await writeFile(tmp, snapshot, "utf8");
+        await rename(tmp, this.file);
+      } catch { /* a failed usage write must never break the host */ }
+    };
+    this.writing = this.writing ? this.writing.then(write, write) : write();
+    return this.writing;
+  }
+}
+
+const usageRecorders = new Map<string, UsageRecorder>();
+export function getUsageRecorder(config: Config): UsageRecorder {
+  const file = config.usage?.file ?? join(config.dataDir ?? dshHomeForHost(), "dsh-skin-usage.json");
+  let recorder = usageRecorders.get(file);
+  if (!recorder) {
+    recorder = new UsageRecorder(file);
+    usageRecorders.set(file, recorder);
+  }
+  return recorder;
+}
+function loadUsageStore(file: string): UsageStore {
+  try {
+    const raw = JSON.parse(readFileSync(file, "utf8")) as Partial<UsageStore>;
+    if (raw.version === USAGE_STORE_VERSION && raw.days && typeof raw.days === "object" && !Array.isArray(raw.days)) {
+      const days: Record<string, DayUsage> = {};
+      for (const [date, value] of Object.entries(raw.days)) {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !value || typeof value !== "object") continue;
+        const day = value as Partial<DayUsage>;
+        days[date] = {
+          date,
+          inputTokens: positiveInt(day.inputTokens),
+          outputTokens: positiveInt(day.outputTokens),
+          cacheReadTokens: positiveInt(day.cacheReadTokens),
+          reasoningTokens: positiveInt(day.reasoningTokens),
+          cost: positiveNum(day.cost),
+          requests: positiveInt(day.requests)
+        };
+      }
+      return { version: USAGE_STORE_VERSION, days };
+    }
+  } catch { /* first run or corrupted file: start clean */ }
+  return { version: USAGE_STORE_VERSION, days: {} };
+}
+function positiveInt(value: unknown): number { return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0; }
+function positiveNum(value: unknown): number { return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0; }
 
 /**
  * Resolve the DeepSeek API key for the balance proxy. The value is read only
@@ -262,6 +469,32 @@ function cssBackdrop(backdrop: unknown): string {
   return `background-image:${colors[0]}`;
 }
 
+/**
+ * llm/stream waterfall wrapper: pass every chunk through untouched and record
+ * the exact provider token usage the moment the `usage` chunk arrives (usage
+ * always precedes finish, and an early consumer break cannot lose the sample).
+ */
+async function* wrapUsageStream(options: { model?: unknown }, stream: AsyncIterable<unknown>, recorder: UsageRecorder, prices: Record<string, Required<UsagePrice>>): AsyncIterable<unknown> {
+  for await (const chunk of stream) {
+    if (chunk && typeof chunk === "object" && (chunk as { type?: unknown }).type === "usage") {
+      const usage = (chunk as { usage?: unknown }).usage;
+      if (usage && typeof usage === "object") {
+        recorder.record(usage as { inputTokens?: unknown; outputTokens?: unknown; cacheReadTokens?: unknown; reasoningTokens?: unknown }, typeof options?.model === "string" ? options.model : "*", prices);
+      }
+    }
+    yield chunk;
+  }
+}
+
+/**
+ * Register an `llm/stream` waterfall listener. The event name is declared by
+ * @deepseek-ai/dsh-llm's module augmentation (not available to this plugin's
+ * isolated build), so the cordis Context is narrowed to the minimal shape.
+ */
+function onLlmStream(ctx: Context, listener: (options: { model?: unknown }, next: () => unknown) => AsyncIterable<unknown>): void {
+  (ctx as unknown as { on(name: "llm/stream", listener: (options: { model?: unknown }, next: () => unknown) => AsyncIterable<unknown>): unknown }).on("llm/stream", listener);
+}
+
 export function apply(ctx: Context, config: Config = {}): void {
   ctx.inject(["webServer"], (httpCtx) => {
     if (typeof httpCtx.effect !== "function") throw new Error("dsh-skin-studio requires the rc.6 effect lifecycle");
@@ -274,6 +507,11 @@ export function apply(ctx: Context, config: Config = {}): void {
       let balanceCache: { at: number; value: BalancePayload } | undefined;
       let updateCache: { at: number; value: UpdateStatus } | undefined;
       let updateBusy = false;
+      // Per-day token/quota ledger: the llm/stream waterfall records exact
+      // provider token usage once per call; cost is a configurable estimate.
+      const usage = getUsageRecorder(config);
+      const prices = resolvePriceTable(config);
+      onLlmStream(ctx, (options, next) => wrapUsageStream(options, next() as AsyncIterable<unknown>, usage, prices));
       const acknowledge = async (receipt: RenderReceipt) => {
         if (!controllerInstanceId) throw new Error("controller instance is unavailable");
         if (config.previewSessionId) {
@@ -339,6 +577,17 @@ export function apply(ctx: Context, config: Config = {}): void {
           } catch (error) {
             json(res, 200, { ok: false, error: { code: "BALANCE_QUERY_FAILED", message: error instanceof Error ? error.name === "AbortError" ? "余额查询超时" : error.message.replace(/\s+/g, " ").slice(0, 120) : "余额查询失败" } });
           }
+        } }),
+        httpCtx.webServer.register({ kind: "exact", path: "/dsh-skin/usage", handler: async (req, res) => {
+          if (req.method !== "GET") { res.writeHead(405, { allow: "GET", "x-content-type-options": "nosniff" }); res.end(); return; }
+          if (!isLoopbackHost(req.headers.host)) return json(res, 403, { error: "FORBIDDEN_HOST" });
+          const url = new URL(req.url || "/", "http://127.0.0.1");
+          const month = url.searchParams.get("month") ?? localMonthKey();
+          if (!/^\d{4}-\d{2}$/.test(month)) return json(res, 400, { error: "INVALID_MONTH" });
+          const days = usage.daysForMonth(month);
+          const monthTotal = days.reduce<DayUsage>((acc, day) => mergeDays(acc, day), emptyDay(""));
+          const today = usage.daySummary(localDateKey());
+          json(res, 200, { ok: true, month, today, monthTotal, days, estimated: true, queriedAt: new Date().toISOString() });
         } }),
         httpCtx.webServer.register({ kind: "exact", path: "/dsh-skin/version", handler: async (_req, res) => {
           if (_req.method !== "GET") { res.writeHead(405, { allow: "GET", "x-content-type-options": "nosniff" }); res.end(); return; }
@@ -415,7 +664,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       };
       void poll();
       const timer = setInterval(() => { void poll(); }, 800);
-      return () => { clearInterval(timer); abort.abort(); preview = null; stable = null; for (const dispose of disposers.reverse()) dispose(); };
+      return () => { clearInterval(timer); abort.abort(); preview = null; stable = null; void usage.flush(); for (const dispose of disposers.reverse()) dispose(); };
     }, "dsh-skin-studio: rc.6 routes and preview poll");
   });
 }
