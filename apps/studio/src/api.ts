@@ -139,6 +139,7 @@ class StudioApi {
     source.addEventListener("design", handler as EventListener);
     source.addEventListener("operation", handler as EventListener);
     source.addEventListener("preview.session.changed", handler as EventListener);
+    source.onopen = () => onEvent({ type: "operation", detail: "EVENT_STREAM_CONNECTED" });
     source.onerror = () => onEvent({ type: "operation", state: "failed", detail: "EVENT_STREAM_DISCONNECTED" });
     return () => source.close();
   }

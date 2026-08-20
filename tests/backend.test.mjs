@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { chromium } from "playwright-core";
-import { canonicalHash, DesignSessionCore } from "../packages/design-session-core/dist/index.js";
+import { AtomicJsonStore, canonicalHash, DesignSessionCore } from "../packages/design-session-core/dist/index.js";
 import { parseThemeSpec } from "../packages/theme-schema/dist/index.js";
 import { apply as applyHost, buildPersistentSkinStyle, injectPersistentSkinStyle, normalizeBalancePayload, resolveBalanceApiKey } from "../packages/dsh-plugin/dist/host/index.js";
 import { PreviewRuntime } from "../apps/controller/dist/preview-runtime.js";
@@ -60,6 +60,16 @@ test("DesignSession CAS admits one writer and patchId replay is durable", async 
     ]);
     assert.equal(race.filter((entry) => entry.status === "fulfilled").length, 1);
     assert.equal(race.filter((entry) => entry.status === "rejected").length, 1);
+  } finally { await safeRemove(root); }
+});
+
+test("AtomicJsonStore accepts legacy UTF-8 BOM JSON records", async () => {
+  const root = await tempRoot("bom-json");
+  try {
+    const store = new AtomicJsonStore(root);
+    await mkdir(join(root, "active"), { recursive: true });
+    await writeFile(join(root, "active", "web.json"), "\ufeff{\n  \"theme\": \"legacy\"\n}\n", "utf8");
+    assert.deepEqual(await store.read("active/web.json"), { theme: "legacy" });
   } finally { await safeRemove(root); }
 });
 
@@ -243,11 +253,13 @@ test("Host fails closed without rc.6 effect and disposes every route", () => {
   const config = { profile: "web", themeFile: "Z:/missing/theme.json", assetDir: "Z:/missing/assets", controllerUrl: "http://127.0.0.1:9", pluginSecret: "x".repeat(43) };
   assert.throws(() => applyHost({ inject(_names, callback) { callback({ webServer: { register() { return () => {}; } } }); } }, config), /effect lifecycle/);
   let cleanup;
+  let registered = 0;
   let disposed = 0;
-  applyHost({ inject(_names, callback) { callback({ webServer: { register() { return () => { disposed += 1; }; }, tapIndex() { return () => { disposed += 1; }; } }, effect(factory) { cleanup = factory(); } }); } }, config);
+  applyHost({ on() { return () => {}; }, inject(_names, callback) { callback({ webServer: { register() { registered += 1; return () => { disposed += 1; }; }, tapIndex() { registered += 1; return () => { disposed += 1; }; } }, effect(factory) { cleanup = factory(); } }); } }, config);
   assert.equal(typeof cleanup, "function");
   cleanup();
-  assert.equal(disposed, 10);
+  assert.ok(registered > 0);
+  assert.equal(disposed, registered);
 });
 
 test("Host exposes version check and one-click update routes", () => {
@@ -294,6 +306,8 @@ test("persistent skin style generation covers linked, split, tokens, and idempot
   assert.match(css, new RegExp(`dsh-skin/assets/${assetId}`));
   assert.match(css, /html body \.pI_x6G_centerCol\{background-color:rgb\(0 0 0 \/ 0\.7\)!important\}/, "the mask must be default-on for the main region");
   assert.match(css, /html body:has\(div\.wSkVaW_heroWorkspaceRow\) \.pI_x6G_centerCol\{background-color:transparent!important\}/, "the mask must be off only on the hero");
+  assert.match(css, /\.pI_x6G_sidebarCol\{position:relative!important;border-right:1px solid rgb\(230 248 255 \/ 76%\)!important;box-shadow:inset -1px 0 7px rgb\(89 192 255 \/ 26%\)!important\}/, "the persistent divider must be painted by the sidebar box, beneath native dialogs");
+  assert.doesNotMatch(css, /pI_x6G_sidebarCol::after/, "the persistent divider must not create a foreground pseudo-element above the settings portal");
   assert.doesNotMatch(css, /#222222/, "linked mode must not use the split sidebar colour");
   const blurred = buildPersistentSkinStyle({ ...theme, appearance: { ...theme.appearance, regions: { ...theme.appearance.regions, main: { ...theme.appearance.regions.main, blurPx: 12 } } } });
   assert.match(blurred, /html body::before\{/, "a blurred backdrop must still use the pseudo canvas");
@@ -324,25 +338,25 @@ test("Host balance proxy resolves the key from credentials and normalizes the De
   } finally { await safeRemove(root); }
 });
 
-test("Balance chip is capability-pinned and the Host route never leaks the API key", async () => {
+test("Quota settings is the single balance surface and the Host route never leaks the API key", async () => {
   const clientSource = await readFile(join(projectRoot, "packages", "dsh-plugin", "src", "client", "index.ts"), "utf8");
   const hostSource = await readFile(join(projectRoot, "packages", "dsh-plugin", "src", "host", "index.ts"), "utf8");
-  assert.match(clientSource, /data-dsh-skin-balance/, "the composer must expose a discoverable balance chip");
-  assert.match(clientSource, /div\.FJxK0a_root/, "the chip must be capability-pinned to the rc.6 composer dock");
-  assert.match(clientSource, /div\.uV2eYG_trailing/, "the chip must also mount on the always-present composer trailing row");
-  assert.match(clientSource, /dsh-skin-balance:v1/, "the chip must persist its value in localStorage so a reload paints immediately");
-  assert.match(clientSource, /fetch\(`\/dsh-skin\/balance/, "the chip must query the same-origin Host proxy");
+  assert.doesNotMatch(clientSource, /data-dsh-skin-balance(?:-button)?=/, "the composer and sidebar must not retain duplicate balance controls");
+  assert.match(clientSource, /data-dsh-skin-quota-section/, "settings must expose the dedicated quota surface");
+  assert.match(clientSource, /name: "settings\.section", id: "quota", order: 17, label: "额度查看"/, "quota must register as its own settings navigation section");
+  assert.match(clientSource, /fetchBalanceValue\(force/, "the settings surface must query the same-origin Host balance proxy");
+  assert.match(clientSource, /fetch\("\/dsh-skin\/usage\/import"/, "the settings surface must expose official usage synchronization");
   assert.match(hostSource, /path: "\/dsh-skin\/balance"/, "the Host must provide the same-origin balance proxy route");
   assert.match(hostSource, /BALANCE_API_KEY_ENV/, "the balance key must resolve from the conventional DeepSeek env/credentials name");
   assert.match(hostSource, /authorization: `Bearer \$\{apiKey\}`/, "the resolved key may only be placed in the outgoing authorization header");
   assert.doesNotMatch(hostSource, /message: [^,;]*\$\{apiKey\}/, "error responses must never interpolate the resolved key");
 });
 
-test("sidebar balance button mounts above settings and the mask is CSS-owned when the base is present", async () => {
+test("quota navigation replaces the sidebar balance button and the mask remains CSS-owned", async () => {
   const clientSource = await readFile(join(projectRoot, "packages", "dsh-plugin", "src", "client", "index.ts"), "utf8");
   const hostSource = await readFile(join(projectRoot, "packages", "dsh-plugin", "src", "host", "index.ts"), "utf8");
-  assert.match(clientSource, /data-dsh-skin-balance-button/, "the sidebar must expose a balance button");
-  assert.match(clientSource, /hHd-Xa_settingsArea/, "the balance button must mount inside the settings area");
+  assert.doesNotMatch(clientSource, /data-dsh-skin-balance-button=/, "the sidebar must not expose the retired balance button");
+  assert.match(clientSource, /installQuotaSettingsSection\(ctx\)/, "the client must install quota through settings navigation");
   assert.match(clientSource, /persistentBaseActive\(\)/, "the client must know when the persistent base owns the mask");
   assert.match(clientSource, /if \(persistentBaseActive\(\)\) return;/, "inline mask painting must yield to the persistent stylesheet");
   assert.match(hostSource, /\.pI_x6G_sidebarCol \.hHd-Xa_root\{background:transparent!important;position:relative!important;z-index:1!important\}/, "the persistent base must keep the sidebar content root transparent and stacked on any replacement");
@@ -916,6 +930,7 @@ test("isolated preview sessions render real rc.6 themes and protect the persiste
     assert.equal(await boundaryLayer(dshPage, "blend").count(), 0, "split divider mode must remove the soft transition band");
     assert.equal(await boundaryLayer(dshPage, "divider").count(), 1, "split divider mode must render one managed divider");
     assert.equal(await boundaryLayer(dshPage, "divider").evaluate((node) => getComputedStyle(node).width), "1px", "the managed split divider must remain a visual line");
+    assert.equal(await boundaryLayer(dshPage, "divider").evaluate((node) => getComputedStyle(node).zIndex), "0", "the preview divider must remain in the backdrop layer below native overlays");
     const linked = await request(base, `/api/v1/design/${splitDivider.id}`, "PATCH", { baseRevision: splitDivider.revision, actor: "human", patchId: randomUUID(), patch: { appearance: { regions: { linked: true, divider: true, main: imageBackdrop(sidebarImage.id) } } } }, headers);
     const linkedLive = await waitPreviewSession(base, initial.id, (session) => session.state === "live" && session.generation > splitDividerLive.generation && session.revision === linked.revision && typeof session.renderReceiptHash === "string");
     await waitForRenderedClient(dshPage, { ...linkedLive, mode: "preview" });
@@ -972,11 +987,7 @@ test("isolated preview sessions render real rc.6 themes and protect the persiste
     await studioDividerToggle.waitFor({ state: "attached" });
     assert.equal(await studioLinkedToggle.isChecked(), true, "the Studio hover-frame check must run against a linked preview");
     assert.equal(await studioDividerToggle.isChecked(), false, "the Studio divider checkbox must reflect the seamless linked design");
-    const studioFrameWrap = studioPage.locator(".frame-wrap");
-    await studioFrameWrap.hover();
-    const studioLinkedHover = studioPage.locator("[data-dsh-skin-linked-hover]");
-    await studioLinkedHover.waitFor({ state: "attached" });
-    assert.deepEqual(await studioLinkedHover.evaluate((node) => ({ border: getComputedStyle(node).borderStyle, pointer: getComputedStyle(node).pointerEvents, label: node.textContent })), { border: "dashed", pointer: "none", label: "整合背景区域" }, "hovering the linked Studio preview must always show a non-intercepting blue dashed selection frame");
+    assert.equal(await studioPage.locator("[data-dsh-skin-linked-hover]").count(), 0, "Studio must not draw a second outer hover frame over the actual DSH region picker");
     await studioDividerToggle.check();
     const studioDividerLive = await waitPreviewSession(base, initial.id, (session) => session.state === "live" && session.generation > linkedNoDividerLive.generation && session.revision > linkedNoDivider.revision && typeof session.renderReceiptHash === "string");
     await waitForRenderedClient(dshPage, { ...studioDividerLive, mode: "preview" });
@@ -985,6 +996,31 @@ test("isolated preview sessions render real rc.6 themes and protect the persiste
     const studioNoDividerLive = await waitPreviewSession(base, initial.id, (session) => session.state === "live" && session.generation > studioDividerLive.generation && session.revision > studioDividerLive.revision && typeof session.renderReceiptHash === "string");
     await waitForRenderedClient(dshPage, { ...studioNoDividerLive, mode: "preview" });
     assert.equal(await boundaryLayer(dshPage).count(), 0, "turning off the Studio divider checkbox must restore the seamless linked canvas");
+    // A slider must paint every input locally, but save only a coalesced final
+    // theme. This uses real browser input events rather than calling the API
+    // directly so a one-frame-behind controlled range is caught too.
+    const opacityRange = studioPage.locator("label.range-control").filter({ hasText: "背景不透明度" }).locator('input[type="range"]');
+    await opacityRange.waitFor({ state: "attached" });
+    let sliderPatchRequests = 0;
+    const countSliderPatch = (request) => {
+      if (request.method() === "PATCH" && request.url() === `${base}/api/v1/design/${linked.id}`) sliderPatchRequests += 1;
+    };
+    studioPage.on("request", countSliderPatch);
+    await opacityRange.evaluate((input) => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      if (!setter) throw new Error("range value setter is unavailable");
+      for (let value = 35; value <= 65; value += 1) {
+        setter.call(input, String(value));
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      input.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+    });
+    await studioPage.waitForTimeout(700);
+    studioPage.off("request", countSliderPatch);
+    assert.ok(sliderPatchRequests <= 2, `31 contiguous range inputs must coalesce into at most one trailing PATCH plus an in-flight edge, received ${sliderPatchRequests}`);
+    assert.equal(await opacityRange.inputValue(), "65", "the rendered range must keep the final drag value without a refresh");
+    const sliderPersisted = await request(base, `/api/v1/design/${linked.id}`);
+    assert.equal(Math.round(sliderPersisted.theme.appearance.backdrop.opacity * 100), 65, "the final slider value must be the persisted draft, not an earlier input");
     const uploadInput = studioPage.locator('#inspector input[type="file"]');
     await uploadInput.waitFor({ state: "attached" });
     const studioUploadResponse = studioPage.waitForResponse((response) => response.url() === `${base}/api/v1/assets` && response.request().method() === "POST", { timeout: 20_000 });
@@ -994,7 +1030,8 @@ test("isolated preview sessions render real rc.6 themes and protect the persiste
     assert.equal(studioUploadResult.status(), 201, `a real Studio file picker upload must reach the local asset API: ${JSON.stringify(studioAsset)}`);
     assert.match(studioAsset.id, /^sha256-[0-9a-f]{64}$/, "a real Studio upload must return a content-addressed asset");
     assert.equal(await studioPage.locator(".upload-error").count(), 0, "a successful real Studio upload must not report Failed to fetch");
-    const uploadedLive = await waitPreviewSession(base, initial.id, (session) => session.state === "live" && session.generation > studioNoDividerLive.generation && session.revision > studioNoDividerLive.revision && typeof session.renderReceiptHash === "string");
+    const uploadedDesign = await waitDesign(base, linked.id, (candidate) => candidate.theme.appearance.regions.main.kind === "image" && candidate.theme.appearance.regions.main.assetId === studioAsset.id);
+    const uploadedLive = await waitPreviewSession(base, initial.id, (session) => session.state === "live" && session.generation > studioNoDividerLive.generation && session.revision === uploadedDesign.revision && typeof session.renderReceiptHash === "string");
     await waitForRenderedClient(dshPage, { ...uploadedLive, mode: "preview" });
     assert.match(await regionLayer(dshPage, "linked").evaluate((node) => getComputedStyle(node).backgroundImage), new RegExp(studioAsset.id), "the actual Studio upload must become the linked real DSH backdrop");
     const hostedAsset = await dshPage.evaluate(async (assetId) => { const response = await fetch(`/dsh-skin/assets/${assetId}`); return { status: response.status, bytes: (await response.arrayBuffer()).byteLength }; }, studioAsset.id);
@@ -1013,37 +1050,10 @@ test("isolated preview sessions render real rc.6 themes and protect the persiste
     assert.equal(await embeddedDsh.locator("html").getAttribute("data-dsh-skin-revision"), String(uploadedLive.revision));
     const sidebarTarget = embeddedDsh.locator("div.pI_x6G_sidebarCol");
     const linkedOverlay = embeddedDsh.locator('button[data-dsh-skin-region-overlay="linked"]');
-    await linkedOverlay.waitFor({ state: "attached" });
-    assert.equal(await linkedOverlay.evaluate((node) => getComputedStyle(node).pointerEvents), "auto", "linked preview must immediately expose its unified hover-and-click selection frame");
-    assert.equal(await embeddedDsh.locator('button[data-dsh-skin-region-overlay="sidebar"]').count(), 0, "linked preview must not hide the selection frame behind separate regional overlays");
-    await linkedOverlay.hover();
-    assert.deepEqual(await linkedOverlay.evaluate((node) => ({ border: getComputedStyle(node).borderStyle, color: getComputedStyle(node).borderColor, fill: getComputedStyle(node).backgroundColor })), { border: "dashed", color: "rgb(36, 148, 255)", fill: "rgba(36, 148, 255, 0.07)" }, "hovering a linked canvas must visibly render a blue dashed frame");
-    assert.equal(await sidebarTarget.evaluate((node) => node.classList.contains("dsh-skin-region-hover")), true, "linked hover must decorate the sidebar surface");
-    const linkedOverlayGeometry = await embeddedDsh.locator('button[data-dsh-skin-region-overlay="linked"]').evaluate((overlay) => { const sidebar = document.querySelector("div.pI_x6G_sidebarCol"); const anchor = document.querySelector("div.wSkVaW_heroWorkspaceRow"); if (!sidebar || !anchor) return null; const rect = (element) => element.getBoundingClientRect(); const outer = rect(overlay), left = rect(sidebar), main = rect(anchor); return { outer: { left: outer.left, top: outer.top, right: outer.right, bottom: outer.bottom }, sidebar: { left: left.left, top: left.top, right: left.right, bottom: left.bottom }, main: { left: main.left, top: main.top, right: main.right, bottom: main.bottom } }; });
-    assert.ok(linkedOverlayGeometry && linkedOverlayGeometry.outer.left <= linkedOverlayGeometry.sidebar.left && linkedOverlayGeometry.outer.right >= linkedOverlayGeometry.main.right && linkedOverlayGeometry.outer.top <= Math.min(linkedOverlayGeometry.sidebar.top, linkedOverlayGeometry.main.top) && linkedOverlayGeometry.outer.bottom >= Math.max(linkedOverlayGeometry.sidebar.bottom, linkedOverlayGeometry.main.bottom), "linked hover frame must visibly cover both regional surfaces");
-    await embeddedDsh.getByRole("button", { name: "结束选区" }).click();
-    assert.equal(await linkedOverlay.evaluate((node) => getComputedStyle(node).pointerEvents), "none", "turning off selection must return every DSH control to normal pointer handling");
-    // rc.6's onboarding mask legitimately sits above the sidebar. Move the
-    // real main-page mouse to the sidebar's screen geometry instead of forcing
-    // a synthetic hover through that mask; the iframe document still receives
-    // the passive pointer move while normal DSH input remains unblocked.
-    const passiveSidebarBox = await sidebarTarget.boundingBox();
-    assert.ok(passiveSidebarBox, "the real sidebar must expose screen geometry for passive hover tracking");
-    await studioPage.mouse.move(passiveSidebarBox.x + passiveSidebarBox.width / 2, passiveSidebarBox.y + passiveSidebarBox.height / 2);
-    assert.deepEqual(await linkedOverlay.evaluate((node) => ({ border: getComputedStyle(node).borderStyle, color: getComputedStyle(node).borderColor, fill: getComputedStyle(node).backgroundColor, pointer: getComputedStyle(node).pointerEvents })), { border: "dashed", color: "rgb(36, 148, 255)", fill: "rgba(36, 148, 255, 0.07)", pointer: "none" }, "linked mode must keep a visible blue dashed hover frame even after selection is ended, without intercepting DSH input");
-    await embeddedDsh.getByRole("button", { name: "选择区域" }).click();
-    assert.equal(await linkedOverlay.evaluate((node) => getComputedStyle(node).pointerEvents), "auto", "selection toggle must still re-enable clicking after passive hover");
-    assert.equal(await linkedOverlay.evaluate((node) => getComputedStyle(node).borderColor), "rgba(0, 0, 0, 0)", "starting selection must clear the passive hover treatment before the click overlay takes over");
-    await linkedOverlay.click();
-    await studioPage.waitForFunction(() => [...document.querySelectorAll(".draft-regions button")].some((button) => button.textContent?.includes("主工作区") && button.getAttribute("aria-pressed") === "true"));
-    assert.equal(await sidebarTarget.evaluate((node) => node.classList.contains("dsh-skin-region-selected")), false, "linked selection must not falsely present the sidebar as an independent edit target");
-    assert.equal(await linkedOverlay.evaluate((node) => getComputedStyle(node).borderStyle), "solid", "linked selection must retain the unified frame's canonical edit target");
-    const selectorButton = embeddedDsh.getByRole("button", { name: "选择区域" });
-    assert.equal(await linkedOverlay.evaluate((node) => getComputedStyle(node).pointerEvents), "none", "ending selection must restore normal DSH pointer interaction");
-    await selectorButton.click();
-    assert.equal(await linkedOverlay.evaluate((node) => getComputedStyle(node).pointerEvents), "auto", "selection toggle must re-enable the unified bridge overlay");
-    await linkedOverlay.focus(); await linkedOverlay.press("Enter");
-    assert.equal(await linkedOverlay.evaluate((node) => getComputedStyle(node).borderStyle), "solid", "keyboard Enter must retain the linked canvas blue selection state");
+    assert.equal(await linkedOverlay.count(), 0, "linked preview must not create a hover or selection frame");
+    assert.equal(await embeddedDsh.locator('button[data-dsh-skin-region-overlay="sidebar"]').count(), 0, "linked preview must not create separate regional pickers");
+    assert.equal(await sidebarTarget.evaluate((node) => node.classList.contains("dsh-skin-region-hover")), false, "linked preview must not decorate the sidebar on hover");
+    assert.equal(await embeddedDsh.getByRole("button", { name: "选择区域" }).count(), 0, "linked preview must not expose a region-selection control");
     const embeddedLink = embeddedDsh.locator('label[data-dsh-skin-region-link="1"] input[type="checkbox"]');
     await embeddedLink.uncheck();
     await studioPage.waitForFunction(() => document.querySelector(".regions-toggle input")?.checked === false);
@@ -1084,6 +1094,15 @@ async function waitPreviewSession(base, id, predicate, timeout = 30_000) {
     await delay(150);
   }
   throw new Error(`Preview session ${id} did not reach expected state: ${JSON.stringify(last)}`);
+}
+async function waitDesign(base, id, predicate, timeout = 10_000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const design = await request(base, `/api/v1/design/${id}`);
+    if (predicate(design)) return design;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+  }
+  throw new Error(`Design ${id} did not reach the expected persisted state`);
 }
 async function waitStatusPreviewUrl(base, expectedUrl, timeout = 30_000) {
   const deadline = Date.now() + timeout;

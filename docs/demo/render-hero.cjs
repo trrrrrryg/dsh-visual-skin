@@ -6,10 +6,11 @@ const path = require("path");
 const { execSync } = require("child_process");
 
 const FPS = Number(process.argv[2] || 30);
-const OUT = process.argv[3] || "docs/demo/out";
-const DURATION = 12;
+const ROOT = path.resolve(__dirname, "..", "..");
+const OUT = path.resolve(ROOT, process.argv[3] || "docs/demo/out");
+const DURATION = 10;
 const W = 1920, H = 1080;
-const HTML = "file:///D:/ruanjianproject/dsh%E8%83%8C%E6%99%AF%E6%9B%B4%E6%8D%A2/docs/demo/hero-a.html";
+const HTML = `file://${path.join(__dirname, "hero-a.html").replace(/\\/g, "/")}`;
 const TMP = path.join(OUT, ".frames-" + Date.now() + "-" + process.pid);
 fs.mkdirSync(TMP, { recursive: true });
 const TOTAL = Math.round(DURATION * FPS);
@@ -28,9 +29,9 @@ const TOTAL = Math.round(DURATION * FPS);
   await browser.close();
 
   // MP4 (H.264 CRF 18)
-  execSync(`ffmpeg -y -framerate ${FPS} -i "${TMP}\\f%04d.png" -c:v libx264 -pix_fmt yuv420p -crf 18 -movflags +faststart "${OUT}\\hero-a-${FPS}fps.mp4"`, { stdio: "inherit" });
+  execSync(`ffmpeg -y -framerate ${FPS} -i "${TMP}\\f%04d.png" -c:v libx264 -pix_fmt yuv420p -crf 18 -movflags +faststart "${path.join(OUT, `hero-a-${FPS}fps.mp4`)}"`, { stdio: "inherit" });
   // GIF (960 wide, palette optimized)
-  execSync(`ffmpeg -y -framerate ${Math.min(15, FPS)} -i "${TMP}\\f%04d.png" -vf "scale=960:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse" -loop 0 "${OUT}\\hero-a.gif"`, { stdio: "inherit" });
+  execSync(`ffmpeg -y -framerate ${Math.min(15, FPS)} -i "${TMP}\\f%04d.png" -vf "scale=960:-1:flags=lanczos,split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle" -loop 0 -gifflags +transdiff "${path.join(OUT, "hero-a-960.gif")}"`, { stdio: "inherit" });
   fs.rmSync(TMP, { recursive: true, force: true });
   console.log("done");
 })().catch((e) => { console.error(e); process.exit(1); });

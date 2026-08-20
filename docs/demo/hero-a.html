@@ -1,270 +1,115 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
-<meta charset="UTF-8" />
-<title>dsh-visual-skin · 一件皮肤，值得被看见</title>
-<style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { width: 100%; height: 100%; background: #0d0f0e; overflow: hidden; }
-  #stage { position: fixed; inset: 0; display: grid; place-items: center; }
-  #canvas { position: relative; width: 1920px; height: 1080px; background: #171a18; overflow: hidden; transform-origin: center center; }
-  .layer { position: absolute; inset: 0; pointer-events: none; }
-  /* ---------- 共享 ---------- */
-  .wordmark { position: absolute; left: 50%; top: 52px; transform: translateX(-50%); text-align: center; opacity: 0; }
-  .wordmark .wm { font-family: "Segoe UI Variable", "Microsoft YaHei UI", sans-serif; font-weight: 800; font-size: 54px; letter-spacing: .01em; color: #f3f1ea; }
-  .wordmark .wm em { font-style: normal; color: #e5764d; }
-  .wordmark .tag { margin-top: 12px; font: 500 17px/1 "Cascadia Code", Consolas, monospace; letter-spacing: .22em; color: rgba(243,241,234,.55); }
-  .claim { position: absolute; left: 50%; top: 168px; transform: translateX(-50%); text-align: center; opacity: 0; }
-  .claim .big { font-family: "Segoe UI Variable", "Microsoft YaHei UI", sans-serif; font-weight: 800; font-size: 66px; color: #f3f1ea; letter-spacing: .005em; text-shadow: 0 6px 40px rgba(0,0,0,.55); }
-  .claim .big em { font-style: normal; color: #e5764d; }
-  .claim .sub { margin-top: 16px; font: 500 20px/1 "Cascadia Code", Consolas, monospace; letter-spacing: .14em; color: rgba(243,241,234,.5); }
-  /* ---------- 卡片（Studio 重建 UI） ---------- */
-  .studio-card { position: absolute; left: 50%; top: 50%; width: 1240px; height: 700px; margin-left: -620px; margin-top: -350px; border-radius: 18px;
-    background: #f3f1ec; overflow: hidden; box-shadow: 0 90px 150px -50px rgba(0,0,0,.85), 0 30px 60px -25px rgba(0,0,0,.6);
-    opacity: 0; }
-  .card-chrome { height: 42px; display: flex; align-items: center; gap: 8px; padding: 0 16px; background: #eae6de; border-bottom: 1px solid #d6d0c5; }
-  .card-chrome i { width: 11px; height: 11px; border-radius: 50%; }
-  .card-chrome i:nth-child(1) { background: #e5764d; } .card-chrome i:nth-child(2) { background: #f0a642; } .card-chrome i:nth-child(3) { background: #55c27e; }
-  .card-chrome .url { margin-left: 12px; flex: 1; height: 24px; border-radius: 6px; background: #fcfbf8; border: 1px solid #d6d0c5; display: flex; align-items: center; padding: 0 12px;
-    color: #626861; font: 500 12px/1 "Cascadia Code", Consolas, monospace; }
-  .app { display: grid; grid-template-rows: 48px 1fr; height: 658px; background: #f3f1ec; }
-  .appbar { display: flex; align-items: center; gap: 14px; padding: 0 16px; background: #fcfbf8; border-bottom: 1px solid #d6d0c5; }
-  .mark { width: 28px; height: 28px; border-radius: 6px; background: #1d201f; color: #fcfbf8; display: grid; place-items: center; font: 700 11px/1 "Cascadia Code", Consolas, monospace; }
-  .appbar .t { font-size: 13px; font-weight: 600; color: #1d201f; }
-  .appbar .seg { margin-left: auto; display: flex; gap: 4px; }
-  .appbar .seg span { padding: 5px 11px; border-radius: 6px; font-size: 11px; color: #626861; }
-  .appbar .seg span.on { background: #1d201f; color: #fcfbf8; }
-  .appbar .go { padding: 6px 15px; border-radius: 8px; background: #b84e2c; color: #fff; font-size: 12px; font-weight: 600; }
-  .work { display: grid; grid-template-columns: 300px 1fr; min-height: 0; }
-  .rail { border-right: 1px solid #d6d0c5; background: #fcfbf8; padding: 14px; display: flex; flex-direction: column; gap: 9px; }
-  .rail .card { border: 1px solid #d6d0c5; border-radius: 10px; background: #fff; padding: 10px; transition: outline-color .12s, filter .12s; }
-  .rail .card .thumb { height: 56px; border-radius: 7px; background: linear-gradient(135deg, #7c4a2a, #e5764d 60%, #f0a642); }
-  .rail .card .nm { margin-top: 7px; font-size: 11px; color: #1d201f; font-weight: 600; }
-  .rail .card .rv { font: 500 9px/1 "Cascadia Code", Consolas, monospace; color: #a79f92; margin-top: 3px; }
-  .rail .card.hot { outline: 2px solid #b84e2c; filter: brightness(1.05); }
-  .stage { background: #151716; position: relative; display: grid; place-items: center; }
-  .stage .frame { width: 88%; height: 84%; border-radius: 12px; border: 1px solid #39413c; background: #242825; position: relative; overflow: hidden; }
-  .stage .frame::before { content: ""; position: absolute; inset: 0;
-    background: radial-gradient(900px 520px at 30% 20%, rgba(230,118,77,.32), transparent 60%),
-      radial-gradient(700px 480px at 80% 75%, rgba(64,184,170,.28), transparent 55%),
-      linear-gradient(160deg, #2a2e2b, #1c1f1d 70%); }
-  .stage .frame .side { position: absolute; left: 0; top: 0; bottom: 0; width: 200px; background: rgba(18,20,19,.55); border-right: 1px solid rgba(255,255,255,.08); }
-  .stage .frame .side i { position: absolute; left: 16px; width: 120px; height: 9px; border-radius: 5px; background: rgba(255,255,255,.14); }
-  .stage .frame .mainbar { position: absolute; left: 0; right: 0; bottom: 0; height: 84px; background: rgba(18,20,19,.6); border-top: 1px solid rgba(255,255,255,.07); display: flex; align-items: center; gap: 10px; padding: 0 22px; }
-  .stage .frame .mainbar i { width: 200px; height: 12px; border-radius: 6px; background: rgba(255,255,255,.18); }
-  /* ---------- 聚光 / halo ---------- */
-  .halo { position: absolute; left: 50%; top: 16%; width: 900px; height: 560px; transform: translateX(-50%); border-radius: 50%;
-    background: radial-gradient(closest-side, rgba(230,118,77,.16), rgba(230,118,77,.03) 55%, transparent); filter: blur(10px); opacity: 0; }
-  .beam { position: absolute; left: 26%; top: -14%; width: 300px; height: 120%; transform: rotate(9deg); opacity: 0;
-    background: linear-gradient(180deg, rgba(255,244,224,.22), rgba(255,244,224,.05) 65%, transparent); filter: blur(3px); }
-  /* ---------- callout 标注 ---------- */
-  .callout { position: absolute; left: 74%; top: 56%; opacity: 0; }
-  .callout .line { position: absolute; left: -140px; top: 22px; width: 140px; height: 2px; background: #40b8aa; transform-origin: right center; }
-  .callout .tag { display: inline-block; padding: 9px 15px; border-radius: 8px; background: rgba(36,40,37,.94); border: 1px solid rgba(255,255,255,.14);
-    color: #f3f1ea; font-size: 15px; font-weight: 600; box-shadow: 0 12px 30px -10px rgba(0,0,0,.6); }
-  .callout .tag small { display: block; margin-top: 4px; font: 500 10px/1 "Cascadia Code", Consolas, monospace; color: #40b8aa; letter-spacing: .14em; }
-  /* ---------- 光标 ---------- */
-  .cursor { position: absolute; width: 34px; height: 34px; opacity: 0; z-index: 6; }
-  .cursor svg { width: 100%; height: 100%; filter: drop-shadow(0 4px 8px rgba(0,0,0,.55)); }
-  .ripple { position: absolute; width: 70px; height: 70px; border-radius: 50%; border: 2.5px solid rgba(64,184,170,.8); opacity: 0; }
-  /* ---------- 写入按钮高亮 ---------- */
-  .go-hi { position: absolute; left: 50%; top: 50%; width: 1240px; height: 700px; margin-left: -620px; margin-top: -350px; border-radius: 18px; pointer-events: none; }
-  .go-hi .ring { position: absolute; right: 24px; top: 52px; width: 118px; height: 34px; border: 2px solid #40b8aa; border-radius: 10px; opacity: 0; box-shadow: 0 0 18px rgba(64,184,170,.5); }
-  /* ---------- 结尾 ---------- */
-  .end-mark { position: absolute; left: 50%; top: 52%; transform: translate(-50%,-50%); text-align: center; opacity: 0; }
-  .end-mark .big { font-family: "Segoe UI Variable", "Microsoft YaHei UI", sans-serif; font-weight: 800; font-size: 72px; color: #f3f1ea; }
-  .end-mark .big em { font-style: normal; color: #e5764d; }
-  .end-mark .sub { margin-top: 18px; font: 500 18px/1 "Cascadia Code", Consolas, monospace; letter-spacing: .2em; color: rgba(243,241,234,.5); }
-  /* chrome（不录） */
-  .no-record { position: fixed; right: 14px; bottom: 12px; z-index: 99; color: rgba(255,255,255,.25); font: 500 11px/1 "Cascadia Code", Consolas, monospace; }
-</style>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DSH Skin Studio · 一张图，长成一套皮肤</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #111513; }
+    #stage { position: fixed; inset: 0; display: grid; place-items: center; overflow: hidden; }
+    #canvas { position: relative; width: 1920px; height: 1080px; overflow: hidden; transform-origin: center; background: radial-gradient(900px 620px at 73% 31%, rgb(224 121 76 / 18%), transparent 65%), radial-gradient(820px 580px at 19% 84%, rgb(52 164 147 / 13%), transparent 63%), linear-gradient(130deg, #151a17, #101311 72%); }
+    #canvas::before { content: ""; position: absolute; inset: 0; opacity: .34; background-image: linear-gradient(rgb(243 241 234 / 4%) 1px, transparent 1px), linear-gradient(90deg, rgb(243 241 234 / 4%) 1px, transparent 1px); background-size: 72px 72px; mask-image: linear-gradient(90deg, #000, transparent 80%); }
+    .eyebrow { position: absolute; left: 132px; top: 94px; z-index: 4; color: #48bdaf; font: 700 18px/1 "Cascadia Code", Consolas, monospace; letter-spacing: .18em; }
+    .headline { position: absolute; left: 126px; top: 145px; z-index: 4; width: 670px; color: #f4f1ea; font-family: "Segoe UI Variable", "Microsoft YaHei UI", sans-serif; }
+    .headline strong { display: block; font-size: 78px; line-height: 1.04; letter-spacing: -.045em; }
+    .headline strong em { color: #e6794d; font-style: normal; }
+    .headline p { width: 530px; margin: 24px 0 0; color: rgb(244 241 234 / 66%); font-size: 23px; line-height: 1.62; }
+    .steps { position: absolute; left: 132px; top: 455px; z-index: 5; display: flex; gap: 12px; }
+    .step { min-width: 138px; padding: 12px 16px; border: 1px solid rgb(243 241 234 / 15%); border-radius: 999px; background: rgb(20 25 22 / 72%); color: rgb(243 241 234 / 62%); font: 600 15px/1 "Segoe UI Variable", "Microsoft YaHei UI", sans-serif; backdrop-filter: blur(12px); }
+    .step b { margin-right: 7px; color: #e6794d; font: 700 12px/1 "Cascadia Code", Consolas, monospace; }
+    .step.active { color: #f4f1ea; border-color: rgb(72 189 175 / 75%); box-shadow: 0 0 0 1px rgb(72 189 175 / 20%), 0 12px 30px -18px rgb(72 189 175 / 75%); }
+    .product-wrap { position: absolute; left: 770px; top: 154px; z-index: 3; width: 1320px; height: 742px; transform-origin: 47% 48%; }
+    .product-shadow { position: absolute; inset: 56px -78px -108px 90px; border-radius: 50%; background: rgb(0 0 0 / 52%); filter: blur(42px); transform: rotate(-4deg); }
+    .product { position: relative; width: 1280px; height: 720px; overflow: hidden; border: 1px solid rgb(244 241 234 / 22%); border-radius: 16px; background: #202321; box-shadow: 0 48px 100px -44px rgb(0 0 0 / 95%), 0 18px 32px -22px rgb(0 0 0 / 72%); }
+    .product img { display: block; width: 100%; height: 100%; object-fit: cover; }
+    .product::after { content: ""; position: absolute; inset: 0; pointer-events: none; background: linear-gradient(132deg, rgb(255 255 255 / 10%), transparent 20%, transparent 71%, rgb(0 0 0 / 15%)); }
+    .focus { position: absolute; z-index: 5; border: 2px solid #48bdaf; border-radius: 10px; box-shadow: 0 0 0 900px rgb(8 11 10 / 28%), 0 0 0 6px rgb(72 189 175 / 13%), 0 18px 34px -18px rgb(0 0 0 / 92%); opacity: 0; }
+    .focus .label { position: absolute; left: 0; top: -43px; padding: 9px 13px; border: 1px solid rgb(72 189 175 / 55%); border-radius: 8px; white-space: nowrap; color: #f4f1ea; background: rgb(19 31 28 / 94%); font: 700 14px/1 "Segoe UI Variable", "Microsoft YaHei UI", sans-serif; }
+    .focus .label small { margin-left: 8px; color: #48bdaf; font: 600 10px/1 "Cascadia Code", Consolas, monospace; letter-spacing: .08em; }
+    #safe-note { position: absolute; right: 105px; bottom: 112px; z-index: 7; width: 410px; padding: 22px 25px; border: 1px solid rgb(244 241 234 / 16%); border-radius: 14px; background: rgb(23 29 26 / 89%); box-shadow: 0 28px 48px -30px rgb(0 0 0 / 90%); opacity: 0; backdrop-filter: blur(16px); }
+    #safe-note b { display: block; color: #f4f1ea; font: 750 24px/1.2 "Segoe UI Variable", "Microsoft YaHei UI", sans-serif; }
+    #safe-note p { margin: 10px 0 0; color: rgb(244 241 234 / 63%); font: 15px/1.6 "Segoe UI Variable", "Microsoft YaHei UI", sans-serif; }
+    #safe-note i { display: inline-block; width: 9px; height: 9px; margin-right: 8px; border-radius: 50%; background: #48bdaf; box-shadow: 0 0 15px rgb(72 189 175 / 85%); }
+    .footer { position: absolute; left: 132px; bottom: 86px; z-index: 4; color: rgb(244 241 234 / 38%); font: 600 14px/1 "Cascadia Code", Consolas, monospace; letter-spacing: .1em; }
+    .footer b { color: #f4f1ea; }
+    .end-card { position: absolute; inset: 0; z-index: 8; display: grid; place-items: center; opacity: 0; pointer-events: none; background: radial-gradient(760px 430px at 50% 49%, rgb(230 121 77 / 17%), transparent 70%); }
+    .end-card div { text-align: center; }
+    .end-card h2 { margin: 0; color: #f4f1ea; font: 800 92px/1 "Segoe UI Variable", "Microsoft YaHei UI", sans-serif; letter-spacing: -.05em; }
+    .end-card h2 em { color: #e6794d; font-style: normal; }
+    .end-card p { margin: 23px 0 0; color: rgb(244 241 234 / 64%); font: 600 22px/1 "Cascadia Code", Consolas, monospace; letter-spacing: .08em; }
+    .no-record { position: fixed; right: 14px; bottom: 12px; color: rgb(255 255 255 / 18%); font: 11px/1 monospace; }
+  </style>
 </head>
 <body>
-<div id="stage">
-  <div id="canvas">
-    <div class="layer" id="L1">
-      <div class="halo" id="halo"></div>
-      <div class="beam" id="beam"></div>
-      <div class="wordmark" id="wordmark"><div class="wm">dsh-<em>visual-skin</em></div><div class="tag">DEEPSEEK HARNESS SKIN STUDIO</div></div>
-      <div class="claim" id="claim"><div class="big">一件皮肤，<em>值得被看见</em></div><div class="sub">DESIGN · PREVIEW · APPLY</div></div>
-    </div>
-    <div class="studio-card" id="card">
-      <div class="card-chrome"><i></i><i></i><i></i><div class="url">http://127.0.0.1:11862 — Skin Studio · 隔离预览</div></div>
-      <div class="app">
-        <div class="appbar">
-          <div class="mark">DS</div><div class="t">DeepSeek Harness Skin Studio</div>
-          <div class="seg"><span>浅色</span><span>深色</span><span class="on">跟随系统</span></div>
-          <div class="go" id="goBtn">写入我的 DSH</div>
-        </div>
-        <div class="work">
-          <div class="rail">
-            <div class="card" data-i="0"><div class="thumb"></div><div class="nm">秋暮错暑</div><div class="rv">r254 · 已应用</div></div>
-            <div class="card" data-i="1"><div class="thumb" style="background:linear-gradient(135deg,#1d4e46,#40b8aa)"></div><div class="nm">MCP 背景替换</div><div class="rv">r2 · 草稿</div></div>
-            <div class="card" data-i="2"><div class="thumb" style="background:linear-gradient(135deg,#4a2c6b,#8b6bb8)"></div><div class="nm">数字装帧</div><div class="rv">r1 · 草稿</div></div>
-          </div>
-          <div class="stage"><div class="frame"><div class="side"><i></i><i></i><i></i></div><div class="mainbar"><i></i><i></i></div></div></div>
-        </div>
-      </div>
-    </div>
-    <div class="go-hi" id="goHi"><div class="ring"></div></div>
-    <div class="callout" id="callout"><div class="line" id="calloutLine"></div><div class="tag">隔离预览 · 不碰你的 DSH<small>ISOLATED INSTANCE</small></div></div>
-    <div class="cursor" id="cursor">
-      <svg viewBox="0 0 24 24" fill="none"><path d="M3 2 L10.5 20 L13 12.5 L20 10 Z" fill="#fff" stroke="#1d201f" stroke-width="1.4" stroke-linejoin="round"/></svg>
-    </div>
-    <div class="ripple" id="ripple"></div>
-    <div class="end-mark" id="endMark"><div class="big">dsh-<em>visual-skin</em></div><div class="sub">一件皮肤，值得被看见</div></div>
-  </div>
-</div>
-<div class="no-record">dsh-visual-skin demo · 12s</div>
-
-<script>
-(function () {
-  "use strict";
-  var canvas = document.getElementById("canvas");
-  var $ = function (id) { return document.getElementById(id); };
-  var els = {
-    halo: $("halo"), beam: $("beam"), wordmark: $("wordmark"), claim: $("claim"),
-    card: $("card"), goHi: $("goHi"), ring: $("goHi").querySelector(".ring"),
-    callout: $("callout"), calloutLine: $("calloutLine"), cursor: $("cursor"), ripple: $("ripple"),
-    endMark: $("endMark"), goBtn: $("goBtn"), cards: [].slice.call(document.querySelectorAll(".rail .card"))
-  };
-  var DURATION = 12;
-  function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
-  function easeOutExpo(t) { return t >= 1 ? 1 : 1 - Math.pow(2, -10 * t); }
-  function easeInOut(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
-  function overshoot(t) { var c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2); }
-  function seg(t, a, b) { return clamp01((t - a) / (b - a)); }
-  function setOp(el, v) { el.style.opacity = v.toFixed(3); }
-
-  // 默认隐藏所有动态元素（每次 render 先重置，再按时间窗口激活）
-  function render(t) {
-    // ---- 镜 1 · 字标定场 (0-1.8s) ----
-    var wmIn = easeOutExpo(seg(t, 0.15, 0.75));
-    var claimIn = easeOutExpo(seg(t, 0.45, 1.05));
-    // 字标 1.7-2.25s 淡出让位
-    var wmOut = 1 - seg(t, 1.7, 2.25);
-    setOp(els.wordmark, wmIn * wmOut);
-    els.wordmark.style.transform = "translateX(-50%) translateY(" + (14 - 14 * wmIn).toFixed(1) + "px)";
-    setOp(els.claim, claimIn * wmOut);
-    els.claim.style.transform = "translateX(-50%) translateY(" + (12 - 12 * claimIn).toFixed(1) + "px)";
-    // 光标全程隐藏（方向 A 无光标，除非镜 4/5 激活）
-    var cursorActive = t >= 6.3 && t <= 10.1;
-    if (!cursorActive) setOp(els.cursor, 0);
-    if (t <= 10.1) setOp(els.ripple, 0);
-
-    // ---- 镜 2 · 展品登场 (1.8-4.5s) ----
-    var rise = seg(t, 1.9, 2.9);
-    var riseE = overshoot(rise);
-    var bob = Math.sin(t * 2.6) * 4 * (t > 2.2 && t < 4.4 ? 1 : 0);
-    var tyCard = (1 - riseE) * 120;
-    var rotY = -8 * (1 - riseE * 0.6);
-    setOp(els.card, rise > 0 ? Math.min(1, rise * 1.4) : 0);
-    els.card.style.transform = "translateY(" + (tyCard + bob).toFixed(1) + "px) perspective(1600px) rotateY(" + rotY.toFixed(1) + "deg)";
-    setOp(els.halo, 0.85 * seg(t, 2.0, 2.8));
-    var beamT = seg(t, 2.4, 4.0);
-    setOp(els.beam, 0.8 * Math.sin(Math.min(1, beamT) * Math.PI));
-    els.beam.style.left = (26 + 16 * easeInOut(beamT)).toFixed(1) + "%";
-
-    // ---- 镜 3 · 隔离预览特写 (4.5-6.0s) ----
-    if (t >= 4.5) {
-      var zoom3 = easeInOut(seg(t, 4.5, 5.3));
-      var z = 1 + 0.8 * zoom3;
-      var tx = (0.5 - 0.56) * 1920 * z;
-      var ty3 = (0.5 - 0.44) * 1080 * z;
-      els.card.style.transform = "translate(" + tx.toFixed(1) + "px," + ty3.toFixed(1) + "px) scale(" + z.toFixed(4) + ")";
-      setOp(els.card, 1);
-      setOp(els.halo, 0.85 * seg(t, 2.0, 2.8) * (1 - seg(t, 4.6, 5.2)));
-      setOp(els.beam, 0);
-      els.calloutLine.style.transform = "scaleX(" + easeOutExpo(seg(t, 5.0, 5.5)).toFixed(3) + ")";
-      var coIn = easeOutExpo(seg(t, 5.3, 5.8));
-      var coOut = 1 - seg(t, 6.1, 6.5);
-      setOp(els.callout, coIn * coOut);
-    } else { setOp(els.callout, 0); }
-
-    // ---- 镜 4 · 主题切换 (6.0-7.8s) ----
-    if (t >= 6.0 && t < 7.8) {
-      var zoom4 = easeInOut(seg(t, 6.0, 6.6));
-      var z4 = 1.8 - 0.45 * zoom4;
-      var tx4 = (0.5 - 0.56) * 1920 * z4;
-      var ty4 = (0.5 - 0.44) * 1080 * z4;
-      els.card.style.transform = "translate(" + tx4.toFixed(1) + "px," + ty4.toFixed(1) + "px) scale(" + z4.toFixed(4) + ")";
-      // 光标弧线到主题卡 2（卡 2 相对 card 坐标约 196,268）
-      var cMove = easeInOut(seg(t, 6.3, 7.0));
-      var px = (1 - cMove) * (1 - cMove) * 900 + 2 * (1 - cMove) * cMove * 990 + cMove * cMove * 196;
-      var py = (1 - cMove) * (1 - cMove) * 430 + 2 * (1 - cMove) * cMove * 368 + cMove * cMove * 268;
-      if (t >= 6.3) { setOp(els.cursor, 1); els.cursor.style.transform = "translate(" + px.toFixed(1) + "px," + py.toFixed(1) + "px)"; }
-      // 点击 ripple（7.0-7.35s）
-      var rip = seg(t, 7.0, 7.35);
-      if (rip > 0 && rip < 1) {
-        setOp(els.ripple, 0.9 * (1 - rip));
-        els.ripple.style.transform = "translate(" + (px - 35 + 35 * rip).toFixed(1) + "px," + (py - 35 + 35 * rip).toFixed(1) + "px) scale(" + (0.4 + 0.6 * rip).toFixed(3) + ")";
-      }
-      // 主题卡 2 高亮
-      els.cards[1].classList.toggle("hot", seg(t, 7.1, 7.4) > 0.5);
-    } else { els.cards[1].classList.remove("hot"); }
-
-    // ---- 镜 5 · 写入按钮 (7.8-9.6s) ----
-    if (t >= 7.8 && t < 9.7) {
-      var zoom5 = easeInOut(seg(t, 7.8, 8.4));
-      var z5 = 1.35 + 0.45 * zoom5;
-      var tx5 = (0.5 - 0.56) * 1920 * z5;
-      var ty5 = (0.5 - 0.44) * 1080 * z5;
-      els.card.style.transform = "translate(" + tx5.toFixed(1) + "px," + ty5.toFixed(1) + "px) scale(" + z5.toFixed(4) + ")";
-      // 光标移到写入按钮（约 1080,96）
-      var c2 = easeInOut(seg(t, 8.5, 9.2));
-      var px2 = (1 - c2) * (1 - c2) * 196 + 2 * (1 - c2) * c2 * 640 + c2 * c2 * 1080;
-      var py2 = (1 - c2) * (1 - c2) * 268 + 2 * (1 - c2) * c2 * 120 + c2 * c2 * 96;
-      if (t >= 8.5) { setOp(els.cursor, 1); els.cursor.style.transform = "translate(" + px2.toFixed(1) + "px," + py2.toFixed(1) + "px)"; }
-      var rip2 = seg(t, 9.2, 9.55);
-      if (rip2 > 0 && rip2 < 1) {
-        setOp(els.ripple, 0.9 * (1 - rip2));
-        els.ripple.style.transform = "translate(" + (px2 - 35 + 35 * rip2).toFixed(1) + "px," + (py2 - 35 + 35 * rip2).toFixed(1) + "px) scale(" + (0.4 + 0.6 * rip2).toFixed(3) + ")";
-      }
-      els.goBtn.style.background = seg(t, 9.25, 9.5) > 0.2 ? "#087e72" : "#b84e2c";
-      setOp(els.ring, 0.9 * seg(t, 9.3, 9.6));
-    } else {
-      els.goBtn.style.background = "#b84e2c";
-      setOp(els.ring, 0);
-    }
-
-    // ---- 镜 6 · 谢幕 (9.6-12s) ----
-    if (t >= 9.6) {
-      var zoom6 = easeInOut(seg(t, 9.7, 10.4));
-      var z6 = 1.8 - 0.8 * zoom6;
-      var tx6 = (0.5 - 0.56) * 1920 * z6;
-      var ty6 = (0.5 - 0.44) * 1080 * z6;
-      var cardOut = seg(t, 10.2, 10.9);
-      setOp(els.card, 1 - cardOut);
-      els.card.style.transform = "translate(" + tx6.toFixed(1) + "px," + ty6.toFixed(1) + "px) scale(" + (z6 * (1 - 0.25 * cardOut)).toFixed(4) + ")";
-      var endIn = easeOutExpo(seg(t, 10.6, 11.3));
-      setOp(els.endMark, endIn);
-      els.endMark.style.transform = "translate(-50%,-50%) scale(" + (0.94 + 0.06 * endIn).toFixed(3) + ")";
-      setOp(els.cursor, 1 - seg(t, 9.8, 10.1));
-      setOp(els.ring, 0.9 * seg(t, 9.3, 9.6) * (1 - seg(t, 9.9, 10.2)));
-    } else { setOp(els.endMark, 0); }
-  }
-
-  window.__ready = true;
-  var playing = true;
-  var rafId = null;
-  window.__seek = function (t) {
-    playing = false;
-    if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
-    render(Math.max(0, Math.min(DURATION - 0.001, t)));
-  };
-
-  // 自驱动播放（非录制时）
-  if (!(window.__recording || window.__seekRender)) {
-    var start = performance.now();
-    function tick(now) {
-      if (!playing) return;
-      var t = (now - start) / 1000;
-      render(t >= DURATION ? DURATION - 0.001 : t);
-      if (t < DURATION) rafId = requestAnimationFrame(tick);
-    }
-    rafId = requestAnimationFrame(tick);
-  }
-})();
-</script>
+  <main id="stage"><section id="canvas" aria-label="DSH Skin Studio product tour">
+    <div class="eyebrow" id="eyebrow">DSH SKIN STUDIO</div>
+    <div class="headline" id="headline"><strong>一张图，<em>长成</em>一套皮肤</strong><p>从双区域设计到真实隔离预览；确认之前，绝不改动你的 DeepSeek Harness。</p></div>
+    <div class="steps" id="steps"><span class="step" data-step="0"><b>01</b>设计皮肤</span><span class="step" data-step="1"><b>02</b>隔离预览</span><span class="step" data-step="2"><b>03</b>人工确认</span></div>
+    <div class="product-wrap" id="productWrap"><div class="product-shadow"></div><div class="product"><img src="../../apps/studio/artifacts/studio-final-desktop.png" alt="真实 DSH Skin Studio 界面" /></div></div>
+    <div class="focus" id="focus"><span class="label" id="focusLabel">区域设计 <small>LIVE CONTROLS</small></span></div>
+    <aside id="safe-note"><b><i></i>真实隔离预览</b><p>预览在独立 DSH 中完成。写入操作必须由你在可见的 Studio 内亲自确认。</p></aside>
+    <div class="footer"><b>IMAGE → SKIN → DSH</b> · LOCAL-FIRST · HUMAN CONFIRMED</div>
+    <div class="end-card" id="endCard"><div><h2>看见以后，<em>再写入。</em></h2><p>DESIGN · PREVIEW · APPLY</p></div></div>
+  </section></main>
+  <div class="no-record">dsh-visual-skin demo · 10s</div>
+  <script>
+    (() => {
+      const DURATION = 10;
+      const canvas = document.getElementById('canvas');
+      const productWrap = document.getElementById('productWrap');
+      const headline = document.getElementById('headline');
+      const eyebrow = document.getElementById('eyebrow');
+      const focus = document.getElementById('focus');
+      const focusLabel = document.getElementById('focusLabel');
+      const safeNote = document.getElementById('safe-note');
+      const endCard = document.getElementById('endCard');
+      const steps = [...document.querySelectorAll('[data-step]')];
+      const clamp = value => Math.max(0, Math.min(1, value));
+      const segment = (t, start, end) => clamp((t - start) / (end - start));
+      const ease = t => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+      const mix = (a, b, t) => a + (b - a) * t;
+      const fade = (t, start, inEnd, outStart, end) => ease(segment(t, start, inEnd)) * (1 - ease(segment(t, outStart, end)));
+      const setFocus = (x, y, w, h, text, code, opacity) => {
+        focus.style.left = `${x}px`; focus.style.top = `${y}px`; focus.style.width = `${w}px`; focus.style.height = `${h}px`;
+        focusLabel.innerHTML = `${text} <small>${code}</small>`; focus.style.opacity = opacity.toFixed(3);
+      };
+      const render = time => {
+        const t = Math.max(0, Math.min(DURATION, time));
+        const arrive = ease(segment(t, 0, 1.25));
+        const preview = ease(segment(t, 3.0, 4.05));
+        const confirm = ease(segment(t, 5.85, 6.9));
+        const closing = ease(segment(t, 8.25, 9.35));
+        const x = mix(700, 560, preview) + mix(0, 22, confirm);
+        const y = mix(162, 222, preview) + mix(0, 15, confirm);
+        const scale = mix(.89, 1.0, arrive) * mix(1, 1.17, preview) * mix(1, .90, closing);
+        const rot = mix(-5.5, -1.2, arrive) * (1 - preview) + mix(-1.2, 0, preview);
+        productWrap.style.transform = `translate(${(x - 770).toFixed(1)}px, ${(y - 154).toFixed(1)}px) scale(${scale.toFixed(4)}) perspective(1700px) rotateY(${rot.toFixed(2)}deg)`;
+        productWrap.style.opacity = (1 - closing * .82).toFixed(3);
+        headline.style.opacity = (1 - preview * .92 - closing * .08).toFixed(3);
+        headline.style.transform = `translateY(${(1 - arrive) * 18 - preview * 9}px)`;
+        eyebrow.style.opacity = (1 - closing).toFixed(3);
+        steps.forEach((step, index) => step.classList.toggle('active', index === (t < 3.0 ? 0 : t < 5.85 ? 1 : 2)));
+        const designOpacity = fade(t, 1.55, 2.05, 2.85, 3.35);
+        const previewOpacity = fade(t, 3.15, 3.65, 5.45, 5.95);
+        const confirmOpacity = fade(t, 6.0, 6.45, 7.85, 8.35);
+        if (designOpacity > .01) setFocus(1655, 198, 278, 530, '背景与视觉处理', 'DESIGN', designOpacity);
+        else if (previewOpacity > .01) setFocus(856, 256, 700, 433, '真实隔离预览', 'ISOLATED', previewOpacity);
+        else if (confirmOpacity > .01) setFocus(1653, 49, 160, 54, '写入前确认', 'HUMAN', confirmOpacity);
+        else focus.style.opacity = '0';
+        safeNote.style.opacity = confirmOpacity.toFixed(3);
+        safeNote.style.transform = `translateY(${(1 - confirmOpacity) * 16}px)`;
+        endCard.style.opacity = closing.toFixed(3);
+      };
+      const fit = () => { const scale = Math.min(innerWidth / 1920, innerHeight / 1080); canvas.style.transform = `scale(${scale})`; };
+      let started = performance.now();
+      let playing = true;
+      const tick = now => { if (!playing) return; const t = Math.min((now - started) / 1000, DURATION); render(t); if (t >= DURATION) started = now; requestAnimationFrame(tick); };
+      window.__seek = value => { playing = false; render(value); };
+      window.__ready = true;
+      addEventListener('resize', fit); fit(); render(0); if (!window.__recording) requestAnimationFrame(tick);
+    })();
+  </script>
 </body>
 </html>

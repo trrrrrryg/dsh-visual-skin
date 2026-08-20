@@ -89,9 +89,9 @@ h1, h2, h3, p { margin: 0; }
 .status-dot.warning { background: var(--warning); }
 .status-dot.danger { background: var(--danger); }
 .segmented { display: flex; height: 30px; padding: 2px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-soft); }
-.segmented button, .scene-tabs button, .library-filters button { padding: 0 10px; color: var(--text-muted); background: transparent; border-radius: 5px; cursor: pointer; font-size: 11px; }
-.segmented button:hover:not(:disabled), .scene-tabs button:hover:not(:disabled), .library-filters button:hover:not(:disabled) { color: var(--text); background: var(--surface); }
-.segmented button[aria-pressed="true"], .scene-tabs button[aria-pressed="true"], .library-filters button[aria-pressed="true"] { color: var(--text); background: var(--surface); box-shadow: 0 1px 2px rgb(0 0 0 / 7%); }
+.segmented button, .scene-tabs button { padding: 0 10px; color: var(--text-muted); background: transparent; border-radius: 5px; cursor: pointer; font-size: 11px; }
+.segmented button:hover:not(:disabled), .scene-tabs button:hover:not(:disabled) { color: var(--text); background: var(--surface); }
+.segmented button[aria-pressed="true"], .scene-tabs button[aria-pressed="true"] { color: var(--text); background: var(--surface); box-shadow: 0 1px 2px rgb(0 0 0 / 7%); }
 .history-actions { gap: 2px; }
 .icon-button { display: inline-grid; place-items: center; flex: none; width: 32px; height: 32px; padding: 0; color: var(--text-muted); background: transparent; border-radius: 6px; cursor: pointer; text-decoration: none; }
 .icon-button:hover:not(:disabled) { color: var(--text); background: var(--surface-soft); }
@@ -114,8 +114,6 @@ h1, h2, h3, p { margin: 0; }
 .search-field { display: grid; grid-template-columns: 18px 1fr; align-items: center; gap: 7px; height: 36px; margin: 0 12px; padding: 0 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text-muted); }
 .search-field:focus-within { border-color: var(--focus); box-shadow: 0 0 0 1px var(--focus); }
 .search-field input { min-width: 0; padding: 0; border: 0; outline: 0; background: transparent; font-size: 12px; }
-.library-filters { display: flex; gap: 2px; height: 42px; padding: 7px 12px 5px; }
-.library-filters button { min-width: 48px; }
 .theme-list { min-height: 0; padding: 4px 8px 16px; overflow-y: auto; }
 .theme-row { position: relative; min-height: 88px; margin-bottom: 3px; border-radius: 7px; }
 .theme-row::before { content: ""; position: absolute; inset: 5px auto 5px 0; width: 3px; border-radius: 3px; background: transparent; }
@@ -176,8 +174,6 @@ h1, h2, h3, p { margin: 0; }
    invisible (opacity 0) and non-interactive, sitting exactly over the
    verified frame so the client still paints at a real viewport size. */
 .frame-wrap .preview-candidate-frame { position: absolute; inset: 0; opacity: 0; pointer-events: none; }
-.linked-preview-hover-frame { position: absolute; z-index: 4; inset: 3px; display: grid; place-items: start center; pointer-events: none; border: 2px dashed #2494ff; background: rgb(36 148 255 / 5%); box-shadow: inset 0 0 0 1px rgb(36 148 255 / 30%), 0 0 0 1px rgb(36 148 255 / 16%); border-radius: 3px; }
-.linked-preview-hover-frame span { margin-top: 8px; padding: 3px 6px; color: #eaf6ff; border: 1px solid rgb(36 148 255 / 64%); border-radius: 4px; background: rgb(17 40 60 / 88%); font: 700 10px/1 "Cascadia Code", Consolas, monospace; letter-spacing: .02em; }
 .frame-loading { position: absolute; inset: 0; z-index: 1; display: grid; place-items: center; align-content: center; gap: 12px; color: var(--text-muted); background: var(--surface); font-size: 12px; }
 .spinner { width: 20px; height: 20px; border: 2px solid var(--border); border-top-color: var(--preview); border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }

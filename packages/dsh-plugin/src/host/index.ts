@@ -1,13 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream, createWriteStream, readFileSync } from "node:fs";
-import { cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { constants as fsConstants, copyFileSync, createReadStream, createWriteStream, existsSync, readFileSync } from "node:fs";
+import { copyFile, cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Context } from "@deepseek-ai/cordis";
 import type { WebServer } from "@deepseek-ai/dsh-host-webserver";
+import { fetchPlatformMonth, PlatformError, readPlatformTokenCandidatesFromBrowsers, validatePlatformToken } from "./platform-import.js";
 
 interface ThemeDocument { designId: string; revision: number; hash: string; theme: unknown }
 interface PreviewSession extends ThemeDocument { expiresAt: string; sessionId?: string; generation?: number }
@@ -88,10 +89,31 @@ export interface DayUsage {
   outputTokens: number;
   cacheReadTokens: number;
   reasoningTokens: number;
-  cost: number; // estimated CNY
+  cost: number; // estimated CNY (local) or official CNY (imported)
+  requests: number;
+  models: Record<string, ModelUsage>;
+  source?: "local" | "official";
+}
+export interface ModelUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  reasoningTokens: number;
+  cost: number;
   requests: number;
 }
-export interface UsageStore { version: 1; days: Record<string, DayUsage> }
+export interface UsageDayBuckets { local?: DayUsage; official?: DayUsage }
+export interface UsageStore {
+  version: 2;
+  days: Record<string, UsageDayBuckets>;
+  officialMonths: Record<string, { syncedAt: string; currency: string }>;
+}
+export interface OfficialMonthSnapshot {
+  month: string;
+  days: Array<Pick<DayUsage, "date" | "inputTokens" | "outputTokens" | "cacheReadTokens" | "cost" | "requests" | "models">>;
+  syncedAt: string;
+  currency: string;
+}
 
 // DeepSeek's published CNY pricing (per 1M tokens) as sensible defaults; any
 // entry can be overridden through `config.usage.prices` and unknown models
@@ -103,7 +125,7 @@ const DEFAULT_USAGE_PRICES: Record<string, Required<UsagePrice>> = {
   "deepseek-reasoner": { input: 2, cacheRead: 0.5, output: 8 },
   "*": { input: 1, cacheRead: 0.2, output: 2 }
 };
-const USAGE_STORE_VERSION = 1 as const;
+const USAGE_STORE_VERSION = 2 as const;
 const USAGE_WRITE_DEBOUNCE_MS = 2_000;
 
 export function localDateKey(date = new Date()): string {
@@ -114,6 +136,22 @@ export function localDateKey(date = new Date()): string {
 }
 export function localMonthKey(date = new Date()): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
+function validMonth(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})$/.exec(value);
+  return !!match && Number(match[2]) >= 1 && Number(match[2]) <= 12;
+}
+function monthOrdinal(value: string): number {
+  const [year, month] = value.split("-").map(Number);
+  return year! * 12 + month! - 1;
+}
+function monthKeys(from: string, to: string, maximum: number): string[] | null {
+  if (!validMonth(from) || !validMonth(to)) return null;
+  const start = monthOrdinal(from), end = monthOrdinal(to);
+  if (start > end || end - start + 1 > maximum) return null;
+  const keys: string[] = [];
+  for (let value = start; value <= end; value += 1) keys.push(`${Math.floor(value / 12)}-${String(value % 12 + 1).padStart(2, "0")}`);
+  return keys;
 }
 export function resolvePriceTable(config: Config): Record<string, Required<UsagePrice>> {
   const table: Record<string, Required<UsagePrice>> = {};
@@ -143,7 +181,7 @@ export function totalTokens(day: Pick<DayUsage, "inputTokens" | "outputTokens" |
   return day.inputTokens + day.outputTokens + day.cacheReadTokens;
 }
 export function emptyDay(date: string): DayUsage {
-  return { date, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, reasoningTokens: 0, cost: 0, requests: 0 };
+  return { date, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, reasoningTokens: 0, cost: 0, requests: 0, models: {} };
 }
 export function mergeDays(target: DayUsage, other: DayUsage): DayUsage {
   target.inputTokens += other.inputTokens;
@@ -152,7 +190,30 @@ export function mergeDays(target: DayUsage, other: DayUsage): DayUsage {
   target.reasoningTokens += other.reasoningTokens;
   target.cost += other.cost;
   target.requests += other.requests;
+  for (const [model, usage] of Object.entries(other.models)) {
+    const current = target.models[model] ?? emptyModelUsage();
+    mergeModelUsage(current, usage);
+    target.models[model] = current;
+  }
   return target;
+}
+
+function emptyModelUsage(): ModelUsage {
+  return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, reasoningTokens: 0, cost: 0, requests: 0 };
+}
+function mergeModelUsage(target: ModelUsage, other: ModelUsage): void {
+  target.inputTokens += other.inputTokens;
+  target.outputTokens += other.outputTokens;
+  target.cacheReadTokens += other.cacheReadTokens;
+  target.reasoningTokens += other.reasoningTokens;
+  target.cost += other.cost;
+  target.requests += other.requests;
+}
+function cloneDay(day: DayUsage, source?: "local" | "official"): DayUsage {
+  return { ...day, models: Object.fromEntries(Object.entries(day.models).map(([model, usage]) => [model, { ...usage }])), ...(source ? { source } : {}) };
+}
+function hasUsage(day: DayUsage): boolean {
+  return day.inputTokens > 0 || day.outputTokens > 0 || day.cacheReadTokens > 0 || day.reasoningTokens > 0 || day.cost > 0 || day.requests > 0;
 }
 
 /**
@@ -162,13 +223,23 @@ export function mergeDays(target: DayUsage, other: DayUsage): DayUsage {
  */
 export class UsageRecorder {
   readonly file: string;
+  readonly loadWarning?: { code: "USAGE_STORE_RECOVERED"; backupFile?: string };
   private store: UsageStore;
+  private migrationBackupNeeded: boolean;
+  private recoveryWriteBlocked: boolean;
+  private localRevision = 0;
+  private batching = false;
   private writeTimer: ReturnType<typeof setTimeout> | undefined;
-  private writing: Promise<void> | undefined;
+  private writeTail: Promise<void> = Promise.resolve();
+  private batchTail: Promise<void> = Promise.resolve();
 
   constructor(file: string) {
     this.file = file;
-    this.store = loadUsageStore(file);
+    const loaded = loadUsageStore(file);
+    this.store = loaded.store;
+    this.migrationBackupNeeded = loaded.migratedFromV1;
+    this.recoveryWriteBlocked = loaded.recoveryWriteBlocked === true;
+    if (loaded.loadWarning) this.loadWarning = loaded.loadWarning;
   }
 
   record(usage: { inputTokens?: unknown; outputTokens?: unknown; cacheReadTokens?: unknown; reasoningTokens?: unknown }, model: string, prices: Record<string, Required<UsagePrice>>): void {
@@ -178,59 +249,184 @@ export class UsageRecorder {
     const reasoning = finiteNonNegative(usage.reasoningTokens) ? usage.reasoningTokens : 0;
     if (input === 0 && output === 0 && cacheRead === 0) return;
     const date = localDateKey();
-    const day = this.store.days[date] ?? emptyDay(date);
+    const buckets = this.store.days[date] ?? {};
+    const day = buckets.local ?? emptyDay(date);
+    const modelName = model.trim() || "unknown";
+    const modelUsage = day.models[modelName] ?? emptyModelUsage();
+    const cost = computeCost({ inputTokens: input, outputTokens: output, cacheReadTokens: cacheRead }, priceForModel(prices, modelName));
     day.inputTokens += input;
     day.outputTokens += output;
     day.cacheReadTokens += cacheRead;
     day.reasoningTokens += reasoning;
-    day.cost += computeCost({ inputTokens: input, outputTokens: output, cacheReadTokens: cacheRead }, priceForModel(prices, model));
+    day.cost += cost;
     day.requests += 1;
-    this.store.days[date] = day;
+    modelUsage.inputTokens += input;
+    modelUsage.outputTokens += output;
+    modelUsage.cacheReadTokens += cacheRead;
+    modelUsage.reasoningTokens += reasoning;
+    modelUsage.cost += cost;
+    modelUsage.requests += 1;
+    day.models[modelName] = modelUsage;
+    buckets.local = day;
+    this.store.days[date] = buckets;
+    this.localRevision += 1;
     this.scheduleWrite();
   }
 
   /** Days with recorded usage inside one "YYYY-MM" month, ascending. */
   daysForMonth(month: string): DayUsage[] {
-    const prefix = `${month}-`;
-    return Object.values(this.store.days)
-      .filter((day) => day.date.startsWith(prefix))
+    return this.daysForRange(month, month);
+  }
+
+  /** Effective days: an official snapshot wins for its date, otherwise local usage is returned. */
+  daysForRange(fromMonth: string, toMonth: string): DayUsage[] {
+    return Object.entries(this.store.days)
+      .filter(([date]) => date.slice(0, 7) >= fromMonth && date.slice(0, 7) <= toMonth)
+      .map(([, buckets]) => buckets.official ? cloneDay(buckets.official, "official") : buckets.local ? cloneDay(buckets.local, "local") : null)
+      .filter((day): day is DayUsage => day !== null && hasUsage(day))
       .sort((a, b) => a.date.localeCompare(b.date))
-      .map((day) => ({ ...day }));
+  }
+
+  syncInfo(fromMonth: string, toMonth: string): { syncedAt?: string } {
+    const values = Object.entries(this.store.officialMonths)
+      .filter(([month]) => month >= fromMonth && month <= toMonth)
+      .map(([, info]) => info.syncedAt)
+      .sort();
+    return values.length > 0 ? { syncedAt: values[values.length - 1]! } : {};
   }
 
   /** Aggregate one day; a zero record is returned when the day has no data. */
   daySummary(date: string): DayUsage {
-    const day = this.store.days[date];
-    return day ? { ...day } : emptyDay(date);
+    const buckets = this.store.days[date];
+    return buckets?.official ? cloneDay(buckets.official, "official") : buckets?.local ? cloneDay(buckets.local, "local") : emptyDay(date);
+  }
+
+  /**
+   * Merge official Open Platform days into the ledger. The platform numbers
+   * are authoritative (exact tokens and exact CNY cost), so each imported day
+   * REPLACES any local estimate for the same date and is flagged `official`.
+   */
+  importMonth(month: string, days: Array<Pick<DayUsage, "date" | "inputTokens" | "outputTokens" | "cacheReadTokens" | "cost" | "requests" | "models">>, syncedAt: string, currency: string): number {
+    const imported = applyOfficialMonth(this.store, { month, days, syncedAt, currency });
+    this.scheduleWrite();
+    return imported;
+  }
+
+  /** Persist all successful official months as one transaction, then publish them to readers. */
+  async importMonthsBatch(snapshots: OfficialMonthSnapshot[]): Promise<number> {
+    if (snapshots.length === 0) return 0;
+    let imported = 0;
+    const operation = async () => { imported = await this.commitMonthsBatch(snapshots); };
+    const queued = this.batchTail.then(operation, operation);
+    this.batchTail = queued.then(() => {}, () => {});
+    await queued;
+    return imported;
+  }
+
+  private async commitMonthsBatch(snapshots: OfficialMonthSnapshot[]): Promise<number> {
+    this.cancelWrite();
+    this.batching = true;
+    let committed = false;
+    try {
+      for (;;) {
+        const revision = this.localRevision;
+        const next = cloneUsageStore(this.store);
+        let imported = 0;
+        for (const snapshot of snapshots) imported += applyOfficialMonth(next, snapshot);
+        await this.enqueueWrite(() => this.writeStore(next));
+        if (revision !== this.localRevision) continue;
+        this.store = next;
+        committed = true;
+        return imported;
+      }
+    } finally {
+      this.batching = false;
+      if (!committed) this.scheduleWrite();
+    }
+  }
+
+  /** Backwards-compatible single-month import entrypoint. */
+  importDays(days: Array<Pick<DayUsage, "date" | "inputTokens" | "outputTokens" | "cacheReadTokens" | "cost" | "requests"> & { models?: Record<string, ModelUsage> }>): number {
+    const byMonth = new Map<string, Array<Pick<DayUsage, "date" | "inputTokens" | "outputTokens" | "cacheReadTokens" | "cost" | "requests" | "models">>>();
+    for (const day of days) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(day.date)) continue;
+      const model = day.models ?? { unknown: { inputTokens: day.inputTokens, outputTokens: day.outputTokens, cacheReadTokens: day.cacheReadTokens, reasoningTokens: 0, cost: day.cost, requests: day.requests } };
+      const monthDays = byMonth.get(day.date.slice(0, 7)) ?? [];
+      monthDays.push({ ...day, models: model });
+      byMonth.set(day.date.slice(0, 7), monthDays);
+    }
+    const syncedAt = new Date().toISOString();
+    let imported = 0;
+    for (const [month, monthDays] of byMonth) imported += this.importMonth(month, monthDays, syncedAt, "CNY");
+    return imported;
   }
 
   flush(): Promise<void> {
     this.cancelWrite();
-    return this.persistNow();
+    const pendingBatches = this.batchTail;
+    return pendingBatches.then(() => this.persistNow());
   }
 
   private scheduleWrite(): void {
+    if (this.batching) return;
     if (this.writeTimer !== undefined) return;
     this.writeTimer = setTimeout(() => {
       this.writeTimer = undefined;
-      void this.persistNow();
+      void this.persistNow().catch(() => {});
     }, USAGE_WRITE_DEBOUNCE_MS);
   }
   private cancelWrite(): void {
     if (this.writeTimer !== undefined) { clearTimeout(this.writeTimer); this.writeTimer = undefined; }
   }
   private persistNow(): Promise<void> {
-    const snapshot = JSON.stringify(this.store);
-    const write = async () => {
-      try {
-        const tmp = `${this.file}.tmp`;
-        await writeFile(tmp, snapshot, "utf8");
-        await rename(tmp, this.file);
-      } catch { /* a failed usage write must never break the host */ }
-    };
-    this.writing = this.writing ? this.writing.then(write, write) : write();
-    return this.writing;
+    return this.enqueueWrite(() => this.writeStore(cloneUsageStore(this.store)));
   }
+
+  private enqueueWrite(write: () => Promise<void>): Promise<void> {
+    const queued = this.writeTail.then(write, write);
+    this.writeTail = queued.then(() => {}, () => {});
+    return queued;
+  }
+
+  private async writeStore(store: UsageStore): Promise<void> {
+    if (this.recoveryWriteBlocked) throw new Error("USAGE_STORE_RECOVERY_BACKUP_FAILED");
+    await mkdir(dirname(this.file), { recursive: true });
+    if (this.migrationBackupNeeded) await copyFile(this.file, `${this.file}.v1.bak`);
+    const tmp = `${this.file}.tmp-${process.pid}-${randomUUID()}`;
+    try {
+      await writeFile(tmp, JSON.stringify(store), "utf8");
+      await rename(tmp, this.file);
+      this.migrationBackupNeeded = false;
+    } catch (error) {
+      await rm(tmp, { force: true }).catch(() => {});
+      throw error;
+    }
+  }
+}
+
+function cloneUsageStore(store: UsageStore): UsageStore {
+  return JSON.parse(JSON.stringify(store)) as UsageStore;
+}
+
+function applyOfficialMonth(store: UsageStore, snapshot: OfficialMonthSnapshot): number {
+  const { month, days, syncedAt, currency } = snapshot;
+  for (const [date, buckets] of Object.entries(store.days)) {
+    if (!date.startsWith(`${month}-`) || !buckets.official) continue;
+    delete buckets.official;
+    if (!buckets.local) delete store.days[date];
+  }
+  let imported = 0;
+  for (const day of days) {
+    if (!day || !day.date.startsWith(`${month}-`) || !/^\d{4}-\d{2}-\d{2}$/.test(day.date)) continue;
+    const official: DayUsage = { date: day.date, inputTokens: positiveInt(day.inputTokens), outputTokens: positiveInt(day.outputTokens), cacheReadTokens: positiveInt(day.cacheReadTokens), reasoningTokens: 0, cost: positiveNum(day.cost), requests: positiveInt(day.requests), models: normalizeModels(day.models) };
+    if (!hasUsage(official)) continue;
+    const buckets = store.days[day.date] ?? {};
+    buckets.official = official;
+    store.days[day.date] = buckets;
+    imported += 1;
+  }
+  store.officialMonths[month] = { syncedAt, currency };
+  return imported;
 }
 
 const usageRecorders = new Map<string, UsageRecorder>();
@@ -243,28 +439,86 @@ export function getUsageRecorder(config: Config): UsageRecorder {
   }
   return recorder;
 }
-function loadUsageStore(file: string): UsageStore {
+function loadUsageStore(file: string): { store: UsageStore; migratedFromV1: boolean; recoveryWriteBlocked?: boolean; loadWarning?: { code: "USAGE_STORE_RECOVERED"; backupFile?: string } } {
   try {
-    const raw = JSON.parse(readFileSync(file, "utf8")) as Partial<UsageStore>;
-    if (raw.version === USAGE_STORE_VERSION && raw.days && typeof raw.days === "object" && !Array.isArray(raw.days)) {
-      const days: Record<string, DayUsage> = {};
-      for (const [date, value] of Object.entries(raw.days)) {
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !value || typeof value !== "object") continue;
-        const day = value as Partial<DayUsage>;
-        days[date] = {
-          date,
-          inputTokens: positiveInt(day.inputTokens),
-          outputTokens: positiveInt(day.outputTokens),
-          cacheReadTokens: positiveInt(day.cacheReadTokens),
-          reasoningTokens: positiveInt(day.reasoningTokens),
-          cost: positiveNum(day.cost),
-          requests: positiveInt(day.requests)
-        };
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as unknown;
+    if (!isRecord(parsed) || !isRecord(parsed.days)) throw new Error("USAGE_STORE_INVALID_SCHEMA");
+    if (parsed.version === 1) {
+      const days: Record<string, UsageDayBuckets> = {};
+      for (const [date, value] of Object.entries(parsed.days)) {
+        const day = normalizeStoredDay(date, value, false);
+        const official = isRecord(value) && value.official === true;
+        days[date] = official ? { official: day } : { local: day };
       }
-      return { version: USAGE_STORE_VERSION, days };
+      return { store: { version: USAGE_STORE_VERSION, days, officialMonths: {} }, migratedFromV1: true };
     }
-  } catch { /* first run or corrupted file: start clean */ }
-  return { version: USAGE_STORE_VERSION, days: {} };
+    if (parsed.version !== USAGE_STORE_VERSION || !isRecord(parsed.officialMonths)) throw new Error("USAGE_STORE_INVALID_SCHEMA");
+    const days: Record<string, UsageDayBuckets> = {};
+    for (const [date, value] of Object.entries(parsed.days)) {
+      if (!isRecord(value) || (value.local === undefined && value.official === undefined)) throw new Error("USAGE_STORE_INVALID_SCHEMA");
+      days[date] = {
+        ...(value.local !== undefined ? { local: normalizeStoredDay(date, value.local, true) } : {}),
+        ...(value.official !== undefined ? { official: normalizeStoredDay(date, value.official, true) } : {})
+      };
+    }
+    const officialMonths: UsageStore["officialMonths"] = {};
+    for (const [month, value] of Object.entries(parsed.officialMonths)) {
+      if (!validMonth(month) || !isRecord(value) || typeof value.syncedAt !== "string" || !Number.isFinite(Date.parse(value.syncedAt)) || typeof value.currency !== "string") throw new Error("USAGE_STORE_INVALID_SCHEMA");
+      officialMonths[month] = { syncedAt: value.syncedAt, currency: value.currency };
+    }
+    return { store: { version: USAGE_STORE_VERSION, days, officialMonths }, migratedFromV1: false };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { store: { version: USAGE_STORE_VERSION, days: {}, officialMonths: {} }, migratedFromV1: false };
+    const backupFile = backupCorruptUsageStore(file);
+    return { store: { version: USAGE_STORE_VERSION, days: {}, officialMonths: {} }, migratedFromV1: false, recoveryWriteBlocked: !backupFile, loadWarning: { code: "USAGE_STORE_RECOVERED", ...(backupFile ? { backupFile } : {}) } };
+  }
+}
+
+function backupCorruptUsageStore(file: string): string | undefined {
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  for (let suffix = 0; suffix < 100; suffix += 1) {
+    const backup = `${file}.corrupt-${stamp}${suffix === 0 ? "" : `-${suffix}`}.bak`;
+    if (existsSync(backup)) continue;
+    try {
+      copyFileSync(file, backup, fsConstants.COPYFILE_EXCL);
+      return basename(backup);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+function normalizeStoredDay(date: string, value: unknown, requireModels: boolean): DayUsage {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !isRecord(value) || (typeof value.date === "string" && value.date !== date)) throw new Error("USAGE_STORE_INVALID_SCHEMA");
+  for (const key of ["inputTokens", "outputTokens", "cacheReadTokens", "reasoningTokens", "cost", "requests"] as const) if (!finiteNonNegative(value[key])) throw new Error("USAGE_STORE_INVALID_SCHEMA");
+  const models = requireModels ? normalizeModels(value.models, true) : { unknown: {
+    inputTokens: value.inputTokens as number,
+    outputTokens: value.outputTokens as number,
+    cacheReadTokens: value.cacheReadTokens as number,
+    reasoningTokens: value.reasoningTokens as number,
+    cost: value.cost as number,
+    requests: value.requests as number
+  } };
+  return { date, inputTokens: value.inputTokens as number, outputTokens: value.outputTokens as number, cacheReadTokens: value.cacheReadTokens as number, reasoningTokens: value.reasoningTokens as number, cost: value.cost as number, requests: value.requests as number, models };
+}
+function normalizeModels(value: unknown, strict = false): Record<string, ModelUsage> {
+  if (!isRecord(value)) {
+    if (strict) throw new Error("USAGE_STORE_INVALID_SCHEMA");
+    return {};
+  }
+  const out: Record<string, ModelUsage> = {};
+  for (const [model, raw] of Object.entries(value)) {
+    if (!model || !isRecord(raw)) {
+      if (strict) throw new Error("USAGE_STORE_INVALID_SCHEMA");
+      continue;
+    }
+    const keys = ["inputTokens", "outputTokens", "cacheReadTokens", "reasoningTokens", "cost", "requests"] as const;
+    if (strict && keys.some((key) => !finiteNonNegative(raw[key]))) throw new Error("USAGE_STORE_INVALID_SCHEMA");
+    out[model] = { inputTokens: positiveNum(raw.inputTokens), outputTokens: positiveNum(raw.outputTokens), cacheReadTokens: positiveNum(raw.cacheReadTokens), reasoningTokens: positiveNum(raw.reasoningTokens), cost: positiveNum(raw.cost), requests: positiveNum(raw.requests) };
+  }
+  return out;
 }
 function positiveInt(value: unknown): number { return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0; }
 function positiveNum(value: unknown): number { return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0; }
@@ -445,8 +699,12 @@ function maskColor(backdrop: unknown): string | null {
 }
 function dividerRules(): string[] {
   return [
-    `html body .pI_x6G_sidebarCol{position:relative!important}`,
-    `html body .pI_x6G_sidebarCol::after{content:"";position:absolute;top:0;right:-0.5px;bottom:0;width:1px;pointer-events:none;background:linear-gradient(to bottom, transparent, rgb(230 248 255 / 62%) 10%, rgb(230 248 255 / 82%) 50%, rgb(230 248 255 / 62%) 90%, transparent);box-shadow:0 0 9px rgb(89 192 255 / 36%);z-index:2}`
+    // A pseudo-element becomes a sibling stacking layer of DSH's settings
+    // portal.  On rc.6 it can therefore paint *over* the dialog even though
+    // the dialog itself has a large local z-index.  Draw the line as part of
+    // the sidebar box instead: borders and inset shadows are painted beneath
+    // descendants, so every native dialog and popover stays unobstructed.
+    `html body .pI_x6G_sidebarCol{position:relative!important;border-right:1px solid rgb(230 248 255 / 76%)!important;box-shadow:inset -1px 0 7px rgb(89 192 255 / 26%)!important}`
   ];
 }
 function cssBackdrop(backdrop: unknown): string {
@@ -582,12 +840,127 @@ export function apply(ctx: Context, config: Config = {}): void {
           if (req.method !== "GET") { res.writeHead(405, { allow: "GET", "x-content-type-options": "nosniff" }); res.end(); return; }
           if (!isLoopbackHost(req.headers.host)) return json(res, 403, { error: "FORBIDDEN_HOST" });
           const url = new URL(req.url || "/", "http://127.0.0.1");
-          const month = url.searchParams.get("month") ?? localMonthKey();
-          if (!/^\d{4}-\d{2}$/.test(month)) return json(res, 400, { error: "INVALID_MONTH" });
-          const days = usage.daysForMonth(month);
-          const monthTotal = days.reduce<DayUsage>((acc, day) => mergeDays(acc, day), emptyDay(""));
+          const requestedMonth = url.searchParams.get("month");
+          const requestedFrom = url.searchParams.get("from");
+          const requestedTo = url.searchParams.get("to");
+          if (requestedMonth && (requestedFrom || requestedTo)) return json(res, 400, { error: "AMBIGUOUS_USAGE_RANGE" });
+          if ((requestedFrom && !requestedTo) || (!requestedFrom && requestedTo)) return json(res, 400, { error: "INVALID_USAGE_RANGE" });
+          const from = requestedFrom ?? requestedMonth ?? localMonthKey();
+          const to = requestedTo ?? requestedMonth ?? from;
+          const months = monthKeys(from, to, 12);
+          if (!months) return json(res, 400, { error: requestedMonth ? "INVALID_MONTH" : "INVALID_USAGE_RANGE" });
+          const days = usage.daysForRange(from, to);
+          const rangeTotal = days.reduce<DayUsage>((acc, day) => mergeDays(acc, day), emptyDay(""));
           const today = usage.daySummary(localDateKey());
-          json(res, 200, { ok: true, month, today, monthTotal, days, estimated: true, queriedAt: new Date().toISOString() });
+          const sources = new Set(days.map((day) => day.source));
+          const source: "local" | "official" | "mixed" = sources.has("official") && sources.has("local") ? "mixed" : sources.has("official") ? "official" : "local";
+          const sync = usage.syncInfo(from, to);
+          json(res, 200, {
+            ok: true,
+            month: requestedMonth ?? (from === to ? from : undefined),
+            from,
+            to,
+            today,
+            monthTotal: rangeTotal,
+            rangeTotal,
+            models: rangeTotal.models,
+            days,
+            source,
+            estimated: source !== "official",
+            ...sync,
+            ...(usage.loadWarning ? { warning: usage.loadWarning } : {}),
+            queriedAt: new Date().toISOString()
+          });
+        } }),
+        // Import official usage from the platform's private dashboard API.
+        // Session credentials are read ephemerally from local browser state;
+        // they are never accepted from the client, persisted, logged or returned.
+        httpCtx.webServer.register({ kind: "exact", path: "/dsh-skin/usage/import", handler: async (req, res) => {
+          if (req.method !== "POST") { res.writeHead(405, { allow: "POST", "x-content-type-options": "nosniff" }); res.end(); return; }
+          if (!isLoopbackHost(req.headers.host)) return json(res, 403, { error: "FORBIDDEN_HOST" });
+          if (!sameOrigin(req)) return json(res, 403, { error: "FORBIDDEN_ORIGIN" });
+          if (!(req.headers["content-type"] || "").toLowerCase().startsWith("application/json")) return json(res, 415, { ok: false, error: { code: "UNSUPPORTED_MEDIA_TYPE", message: "请求体必须是 JSON" } });
+          let body: Record<string, unknown> = {};
+          try {
+            const chunks: Buffer[] = [];
+            let size = 0;
+            for await (const chunk of req) {
+              const part = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+              size += part.length;
+              if (size > 16_384) throw new Error("body too large");
+              chunks.push(part);
+            }
+            const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+            if (!isRecord(parsed)) throw new Error("body must be an object");
+            body = parsed;
+          } catch {
+            return json(res, 400, { ok: false, error: { code: "INVALID_BODY", message: "请求体无效" } });
+          }
+          const allowed = new Set(["month", "scope", "fromMonth", "toMonth"]);
+          if (Object.keys(body).some((key) => !allowed.has(key))) return json(res, 400, { ok: false, error: { code: "INVALID_BODY", message: "请求体包含不支持的字段" } });
+          if ((body.month !== undefined && (typeof body.month !== "string" || !validMonth(body.month)))
+            || (body.fromMonth !== undefined && (typeof body.fromMonth !== "string" || !validMonth(body.fromMonth)))
+            || (body.toMonth !== undefined && (typeof body.toMonth !== "string" || !validMonth(body.toMonth)))) return json(res, 400, { ok: false, error: { code: "INVALID_IMPORT_RANGE", message: "月份格式应为 YYYY-MM" } });
+          const all = body.scope === "all";
+          if (body.scope !== undefined && !all) return json(res, 400, { ok: false, error: { code: "INVALID_SCOPE", message: "scope 仅支持 all" } });
+          if (all && body.month !== undefined) return json(res, 400, { ok: false, error: { code: "INVALID_BODY", message: "all 范围不能同时指定 month" } });
+          if (!all && (body.fromMonth !== undefined || body.toMonth !== undefined)) return json(res, 400, { ok: false, error: { code: "INVALID_BODY", message: "fromMonth/toMonth 仅用于 all 范围" } });
+          const currentMonth = localMonthKey();
+          const from = all ? (typeof body.fromMonth === "string" ? body.fromMonth : "2024-01") : (typeof body.month === "string" ? body.month : currentMonth);
+          const to = all ? (typeof body.toMonth === "string" ? body.toMonth : currentMonth) : from;
+          const months = monthKeys(from, to, 60);
+          if (!months || from < "2024-01" || to > currentMonth) return json(res, 400, { ok: false, error: { code: "INVALID_IMPORT_RANGE", message: "导入范围必须介于 2024-01 和当前月，且不超过 60 个月" } });
+          let candidates: ReturnType<typeof readPlatformTokenCandidatesFromBrowsers> = [];
+          try { candidates = readPlatformTokenCandidatesFromBrowsers(); } catch { candidates = []; }
+          const uniqueCandidates = [...new Map(candidates.map((candidate) => [candidate.token, candidate])).values()];
+          if (uniqueCandidates.length === 0) return json(res, 200, { ok: false, partial: false, from, to, succeededMonths: [], failedMonths: months.map((month) => ({ month, code: "TOKEN_UNAVAILABLE", message: "未找到 DeepSeek 开放平台浏览器登录会话" })), importedDays: 0, error: { code: "TOKEN_UNAVAILABLE", message: "请在本机浏览器登录 platform.deepseek.com 后重试" }, queriedAt: new Date().toISOString() });
+          const authentication = await Promise.all(uniqueCandidates.map(async (candidate) => {
+            try { await validatePlatformToken(candidate.token); return { status: "valid" as const, token: candidate.token }; }
+            catch (error) { return error instanceof PlatformError && error.code === "PLATFORM_AUTH_FAILED" ? { status: "invalid" as const } : { status: "unknown" as const }; }
+          }));
+          if (authentication.some((result) => result.status === "unknown")) return json(res, 200, { ok: false, partial: false, from, to, succeededMonths: [], failedMonths: months.map((month) => ({ month, code: "PLATFORM_ACCOUNT_VALIDATION_FAILED", message: "无法安全确认所有 DeepSeek 开放平台账号" })), importedDays: 0, error: { code: "PLATFORM_ACCOUNT_VALIDATION_FAILED", message: "平台账号验证失败，未写入用量账本" }, queriedAt: new Date().toISOString() });
+          const validTokens = authentication.flatMap((result) => result.status === "valid" ? [result.token] : []);
+          if (validTokens.length === 0) return json(res, 200, { ok: false, partial: false, from, to, succeededMonths: [], failedMonths: months.map((month) => ({ month, code: "PLATFORM_AUTH_FAILED", message: "DeepSeek 开放平台登录会话已失效" })), importedDays: 0, error: { code: "PLATFORM_AUTH_FAILED", message: "请在本机浏览器重新登录 platform.deepseek.com" }, queriedAt: new Date().toISOString() });
+          if (validTokens.length > 1) return json(res, 409, { ok: false, partial: false, from, to, succeededMonths: [], failedMonths: months.map((month) => ({ month, code: "PLATFORM_ACCOUNT_AMBIGUOUS", message: "检测到多个有效 DeepSeek 开放平台账号" })), importedDays: 0, error: { code: "PLATFORM_ACCOUNT_AMBIGUOUS", message: "请仅保留一个已登录平台账号后重试" }, queriedAt: new Date().toISOString() });
+          const authenticatedToken = validTokens[0]!;
+
+          const succeeded: Array<{ month: string; importedDays: number; currency: string; cost: number; tokens: number; requests: number; snapshot: OfficialMonthSnapshot }> = [];
+          const failedMonths: Array<{ month: string; code: string; message: string }> = [];
+          let cursor = 0;
+          const worker = async () => {
+            for (;;) {
+              const index = cursor++;
+              const month = months[index];
+              if (!month) return;
+              let lastError: unknown;
+              try {
+                  const result = await fetchPlatformMonth(authenticatedToken, month);
+                  const snapshot: OfficialMonthSnapshot = { month, syncedAt: new Date().toISOString(), currency: result.currency, days: result.days.map((day) => ({
+                    ...day,
+                    models: Object.fromEntries(Object.entries(day.models).map(([model, modelUsage]) => [model, { ...modelUsage, reasoningTokens: 0 }]))
+                  })) };
+                  const total = result.days.reduce((acc, day) => {
+                    acc.cost += day.cost; acc.tokens += totalTokens(day); acc.requests += day.requests; return acc;
+                  }, { cost: 0, tokens: 0, requests: 0 });
+                  succeeded.push({ month, importedDays: result.days.length, currency: result.currency, snapshot, ...total });
+              } catch (error) { lastError = error; }
+              if (lastError) failedMonths.push({ month, code: lastError instanceof PlatformError ? lastError.code : "IMPORT_FAILED", message: lastError instanceof Error ? lastError.message.replace(/\s+/g, " ").slice(0, 160) : "导入失败" });
+            }
+          };
+          await Promise.all(Array.from({ length: Math.min(3, months.length) }, () => worker()));
+          succeeded.sort((a, b) => a.month.localeCompare(b.month));
+          failedMonths.sort((a, b) => a.month.localeCompare(b.month));
+          if (succeeded.length > 0) {
+            try {
+              const importedDays = await usage.importMonthsBatch(succeeded.map((item) => item.snapshot));
+              if (importedDays !== succeeded.reduce((sum, item) => sum + item.importedDays, 0)) throw new Error("official snapshot validation mismatch");
+            }
+            catch { return json(res, 500, { ok: false, partial: false, from, to, succeededMonths: [], failedMonths: months.map((month) => ({ month, code: "USAGE_PERSIST_FAILED", message: "官方用量写入本地账本失败" })), importedDays: 0, error: { code: "USAGE_PERSIST_FAILED", message: "官方用量写入本地账本失败" }, queriedAt: new Date().toISOString() }); }
+          }
+          const totals = succeeded.reduce((acc, item) => { acc.importedDays += item.importedDays; acc.cost += item.cost; acc.tokens += item.tokens; acc.requests += item.requests; return acc; }, { importedDays: 0, cost: 0, tokens: 0, requests: 0 });
+          const currencies = [...new Set(succeeded.map((item) => item.currency))];
+          const ok = failedMonths.length === 0;
+          json(res, 200, { ok, partial: succeeded.length > 0 && !ok, ...(all ? { scope: "all" as const } : { month: from }), from, to, succeededMonths: succeeded.map((item) => item.month), failedMonths, importedDays: totals.importedDays, currency: currencies.length === 1 ? currencies[0] : undefined, cost: totals.cost, tokens: totals.tokens, requests: totals.requests, queriedAt: new Date().toISOString() });
         } }),
         httpCtx.webServer.register({ kind: "exact", path: "/dsh-skin/version", handler: async (_req, res) => {
           if (_req.method !== "GET") { res.writeHead(405, { allow: "GET", "x-content-type-options": "nosniff" }); res.end(); return; }
@@ -664,7 +1037,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       };
       void poll();
       const timer = setInterval(() => { void poll(); }, 800);
-      return () => { clearInterval(timer); abort.abort(); preview = null; stable = null; void usage.flush(); for (const dispose of disposers.reverse()) dispose(); };
+      return () => { clearInterval(timer); abort.abort(); preview = null; stable = null; void usage.flush().catch(() => {}); for (const dispose of disposers.reverse()) dispose(); };
     }, "dsh-skin-studio: rc.6 routes and preview poll");
   });
 }
@@ -706,13 +1079,35 @@ function json(res: ServerResponse, status: number, body: unknown): void { res.wr
  * route when a preview host is up, while `/api/v1/status` is the Controller's
  * own endpoint — probe the latter since the settings card redirects there.
  */
+/**
+ * Probe the Studio Controller. `/dsh-skin/health` is the DSH-side plugin
+ * route when a preview host is up, while `/api/v1/status` is the Controller's
+ * own endpoint — probe the latter since the settings card redirects there.
+ * Falls back to a raw TCP connect when the HTTP probe fails (the DSH host
+ * process may route/block loopback fetches to other ports; a live socket on
+ * the controller port is still proof it is up).
+ */
 async function controllerAlive(base: string): Promise<boolean> {
   try {
-    const response = await fetch(`${base}/api/v1/status`, { method: "GET", signal: AbortSignal.timeout(1_500) });
+    const response = await fetch(`${base}/api/v1/status`, { method: "GET", signal: AbortSignal.timeout(2_500) });
     if (!response.ok) return false;
     const body = await response.json() as { ok?: unknown };
     return body.ok === true;
-  } catch { return false; }
+  } catch {
+    try {
+      const url = new URL(base);
+      const port = Number.parseInt(url.port, 10);
+      if (!Number.isInteger(port) || port <= 0 || port > 65535) return false;
+      const { connect } = await import("node:net");
+      return await new Promise<boolean>((resolveProbe) => {
+        const socket = connect({ host: url.hostname, port, timeout: 1_500 });
+        const done = (alive: boolean) => { socket.destroy(); resolveProbe(alive); };
+        socket.once("connect", () => done(true));
+        socket.once("timeout", () => done(false));
+        socket.once("error", () => done(false));
+      });
+    } catch { return false; }
+  }
 }
 
 /**

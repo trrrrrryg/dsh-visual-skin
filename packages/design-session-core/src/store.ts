@@ -11,7 +11,12 @@ export class AtomicJsonStore {
 
   async read<T>(relative: string): Promise<T | null> {
     try {
-      return JSON.parse(await readFile(this.path(relative), "utf8")) as T;
+      // Older Windows PowerShell installers may have written UTF-8 JSON with
+      // a BOM. Node's JSON.parse does not accept that leading U+FEFF, which
+      // previously made unrelated reads (such as an apply-plan lookup) fail
+      // with a 500 even though the record itself was otherwise valid.
+      const text = await readFile(this.path(relative), "utf8");
+      return JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text) as T;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw error;

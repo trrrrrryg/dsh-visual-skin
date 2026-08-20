@@ -5,13 +5,15 @@ import { cloneTheme, setRegionBackdrop, setRegionsDivider, setRegionsLinked } fr
 import { TopBar } from "./components/TopBar";
 import { ThemeLibrary } from "./components/ThemeLibrary";
 import { PreviewWorkbench } from "./components/PreviewWorkbench";
-import { Inspector } from "./components/Inspector";
+import { Inspector, type ThemeChangePhase } from "./components/Inspector";
 import { StatusBar } from "./components/StatusBar";
 import { ApplyDialog, ConflictDialog } from "./components/Dialogs";
 import { LayersIcon, SlidersIcon } from "./components/Icons";
 
 type ApplyAction = "apply" | "restore";
+type PersistJob = { designId: string; theme: ThemeSpec; label: string; draftVersion: number };
 const PREVIEW_DEBOUNCE_MS = 220;
+const PERSIST_DEBOUNCE_MS = 220;
 // Do not expose a persistent-write affordance while the warm preview is in
 // its automatic renewal window. The old receipt may still look live in React
 // for one event-loop turn, but the Controller can already be preparing its
@@ -46,7 +48,12 @@ export function App() {
   const serverRef = useRef<DesignSession | null>(null);
   const draftRef = useRef<ThemeSpec | null>(null);
   const saveChain = useRef(Promise.resolve());
-  const pendingSaves = useRef(0);
+  const persistTimer = useRef<number | undefined>();
+  const pendingPersist = useRef<PersistJob | null>(null);
+  const persistInFlight = useRef(0);
+  const draftVersion = useRef(0);
+  const continuousEdit = useRef(false);
+  const previewRefreshPending = useRef(false);
   const pendingPatchIds = useRef(new Set<string>());
   const previewRequest = useRef(0);
   const previewTimer = useRef<number | undefined>();
@@ -83,6 +90,13 @@ export function App() {
       clearTimeout(previewRenewalTimer.current);
       previewRenewalTimer.current = undefined;
     }
+    if (persistTimer.current !== undefined) {
+      clearTimeout(persistTimer.current);
+      persistTimer.current = undefined;
+    }
+    pendingPersist.current = null;
+    continuousEdit.current = false;
+    previewRefreshPending.current = false;
     queuedPreview.current = null;
     previewRequest.current += 1;
     serverRef.current = next; draftRef.current = cloneTheme(next.theme); setDesign(next);
@@ -186,6 +200,50 @@ export function App() {
     }, delay);
   }, [invalidatePlan, startPreview]);
 
+  const resyncSelectedDesign = useCallback(async (source: "event" | "focus") => {
+    const current = serverRef.current;
+    if (!current) return;
+    const designId = current.id;
+    try {
+      const latest = await api.design(designId);
+      if (serverRef.current?.id !== designId) return;
+      if (latest.revision > current.revision) {
+        const hasLocalDraft = Boolean(
+          persistInFlight.current || pendingPersist.current || persistTimer.current !== undefined ||
+          (draftRef.current && !sameTheme(draftRef.current, current.theme))
+        );
+        if (hasLocalDraft) {
+          if (persistTimer.current !== undefined) clearTimeout(persistTimer.current);
+          persistTimer.current = undefined;
+          pendingPersist.current = null;
+          previewRefreshPending.current = false;
+          continuousEdit.current = false;
+          const mine = cloneTheme(draftRef.current ?? current.theme);
+          serverRef.current = latest;
+          setSaving(Boolean(persistInFlight.current));
+          setDesigns((items) => items.map((item) => item.id === latest.id ? latest : item));
+          setDesign((shown) => shown?.id === latest.id ? { ...latest, theme: mine } : shown);
+          setConflictMine(mine);
+          setConflictLatest(latest);
+          invalidatePlan("设计已在其他位置更新，当前写入计划已失效。");
+          setNotice({ tone: "warning", message: `检测到更高版本 r${latest.revision}；本地未提交修改已保留，等待你选择处理方式。` });
+        } else {
+          replaceDesign(latest);
+          invalidatePlan("设计已在其他位置更新，当前写入计划已失效。请等待新的隔离预览完成。");
+          setNotice({ tone: "success", message: `${source === "event" ? "其他操作" : "页面恢复"}已同步草稿 r${latest.revision}；正在刷新隔离预览。` });
+          schedulePreview(latest, 0);
+        }
+      }
+      const knownSessions = [...new Map([activePreviewRef.current, verifiedPreviewRef.current].filter(Boolean).map((session) => [session!.sessionId, session!])).values()];
+      await Promise.all(knownSessions.map(async (session) => {
+        const refreshed = await api.previewSession(session.sessionId).catch(() => null);
+        if (refreshed && serverRef.current?.id === designId && refreshed.generation >= session.generation) acceptSession(refreshed);
+      }));
+    } catch {
+      // The existing preview remains safe to inspect while the local service reconnects.
+    }
+  }, [acceptSession, invalidatePlan, replaceDesign, schedulePreview]);
+
   const bootstrap = useCallback(async () => {
     try {
       setPreview("staging"); const nextStatus = await api.status(); setStatus(nextStatus);
@@ -225,6 +283,7 @@ export function App() {
     };
   }, [applyAction, previewSession, schedulePreview]);
   useEffect(() => api.events((event) => {
+    if (event.detail === "EVENT_STREAM_CONNECTED") { void resyncSelectedDesign("event"); return; }
     if (event.detail === "EVENT_STREAM_DISCONNECTED") { setNotice({ tone: "warning", message: "Controller 事件连接已断开；最后确认的隔离预览仍在显示。" }); return; }
     const changed = previewFromEvent(event, activePreviewRef.current);
     if (changed) { acceptSession(changed); return; }
@@ -237,42 +296,118 @@ export function App() {
       }
     }
     if (event.type === "design.changed" && event.designId === serverRef.current?.id && (event.revision ?? 0) > (serverRef.current?.revision ?? 0)) {
-      const changedDesignId = event.designId;
-      if (changedDesignId) void api.design(changedDesignId).then((next) => { replaceDesign(next); invalidatePlan("设计已在其他位置更新，当前写入计划已失效。请等待新的隔离预览完成。"); setNotice({ tone: "success", message: `${event.actor ?? "Agent"} 的修改已同步到 r${next.revision}；正在复用温隔离预览。` }); schedulePreview(next); });
+      void resyncSelectedDesign("event");
     }
     if (event.state === "failed") setNotice({ tone: "danger", message: event.error?.message ?? "本地操作失败" });
-  }), [acceptSession, invalidatePlan, replaceDesign, schedulePreview]);
+  }), [acceptSession, resyncSelectedDesign]);
+  useEffect(() => {
+    const resync = () => void resyncSelectedDesign("focus");
+    const onVisibility = () => { if (document.visibilityState === "visible") resync(); };
+    addEventListener("focus", resync);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      removeEventListener("focus", resync);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [resyncSelectedDesign]);
   useEffect(() => { document.documentElement.dataset.theme = mode === "system" ? (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light") : mode; }, [mode]);
 
-  const enqueueTheme = useCallback((next: ThemeSpec, label: string, remember = true) => {
-    const draft = draftRef.current; if (!serverRef.current || !draft) return;
-    if (remember) { setHistory((items) => [...items.slice(-29), cloneTheme(draft)]); setFuture([]); }
-    draftRef.current = cloneTheme(next); setDesign((current) => current ? { ...current, theme: next } : current);
-    invalidatePlan("草稿已修改，当前写入计划已失效。草稿画布已即时更新，正在合并温隔离预览刷新。"); pendingSaves.current += 1; setSaving(true);
+  const syncSaving = useCallback(() => {
+    setSaving(Boolean(persistInFlight.current || pendingPersist.current || persistTimer.current !== undefined));
+  }, []);
+  const flushPersistence = useCallback((): Promise<void> => {
+    if (persistTimer.current !== undefined) {
+      clearTimeout(persistTimer.current);
+      persistTimer.current = undefined;
+    }
+    const job = pendingPersist.current;
+    pendingPersist.current = null;
+    if (!job) {
+      syncSaving();
+      return saveChain.current;
+    }
+    persistInFlight.current += 1;
+    syncSaving();
     saveChain.current = saveChain.current.then(async () => {
-      const base = serverRef.current; if (!base) return;
-      const patchId = crypto.randomUUID(); pendingPatchIds.current.add(patchId);
+      const base = serverRef.current;
+      if (!base || base.id !== job.designId) return;
+      const patchId = crypto.randomUUID();
+      pendingPatchIds.current.add(patchId);
       try {
-        const updated = await api.patchDesign(base.id, base.revision, next, "human", patchId);
-        serverRef.current = updated; setDesign((current) => current?.id === updated.id ? { ...updated, theme: draftRef.current ?? updated.theme } : current); setDesigns((items) => items.map((item) => item.id === updated.id ? { ...updated, theme: draftRef.current ?? updated.theme } : item));
-        setNotice({ tone: "success", message: `${label}已保存；会在这一轮编辑结束后复用温隔离预览。` });
+        const updated = await api.patchDesign(base.id, base.revision, job.theme, "human", patchId);
+        // The user may have selected another design or continued dragging
+        // while this request was in flight.  A stale response must update
+        // only its server snapshot, never repaint a newer local draft.
+        if (serverRef.current?.id !== job.designId) return;
+        serverRef.current = updated;
+        const localDraft = draftRef.current;
+        setDesign((current) => current?.id === updated.id ? { ...updated, theme: localDraft ?? updated.theme } : current);
+        setDesigns((items) => items.map((item) => item.id === updated.id ? { ...updated, theme: localDraft ?? updated.theme } : item));
+        if (job.draftVersion === draftVersion.current) setNotice({ tone: "success", message: `${job.label}已保存；正在刷新温隔离预览。` });
       } catch (error) {
         if (error instanceof ApiError && error.code === "REVISION_CONFLICT") {
-          const latest = await api.design(base.id); setConflictMine(cloneTheme(next)); setConflictLatest(latest); serverRef.current = latest; draftRef.current = cloneTheme(latest.theme); setDesign(latest); invalidatePlan("设计版本已变化，当前写入计划已失效。"); setNotice({ tone: "warning", message: `发现更新的 r${latest.revision}；你的修改没有覆盖它` });
-        } else {
-          const stable = serverRef.current; if (stable) { draftRef.current = cloneTheme(stable.theme); setDesign(stable); setDesigns((items) => items.map((item) => item.id === stable.id ? stable : item)); }
+          const latest = await api.design(job.designId).catch(() => null);
+          if (!latest || serverRef.current?.id !== job.designId) return;
+          const mine = cloneTheme(draftRef.current ?? job.theme);
+          serverRef.current = latest;
+          pendingPersist.current = null;
+          previewRefreshPending.current = false;
+          setDesigns((items) => items.map((item) => item.id === latest.id ? latest : item));
+          setDesign((current) => current?.id === latest.id ? { ...latest, theme: mine } : current);
+          setConflictMine(mine);
+          setConflictLatest(latest);
+          invalidatePlan("设计版本已变化，当前写入计划已失效。");
+          setNotice({ tone: "warning", message: `发现更新的 r${latest.revision}；本地草稿已保留，等待你选择处理方式。` });
+        } else if (serverRef.current?.id === job.designId && job.draftVersion === draftVersion.current) {
+          const stable = serverRef.current;
+          draftRef.current = cloneTheme(stable.theme);
+          setDesign(stable);
+          setDesigns((items) => items.map((item) => item.id === stable.id ? stable : item));
           setNotice({ tone: "danger", message: `${error instanceof Error ? error.message : "保存失败"}；已恢复服务器中的稳定草稿` });
         }
       } finally {
         pendingPatchIds.current.delete(patchId);
-        pendingSaves.current -= 1;
-        if (pendingSaves.current === 0) {
-          setSaving(false);
-          schedulePreview(serverRef.current ?? undefined);
-        }
+      }
+    }).finally(() => {
+      persistInFlight.current -= 1;
+      const settled = persistInFlight.current === 0 && pendingPersist.current === null && persistTimer.current === undefined;
+      syncSaving();
+      if (settled && previewRefreshPending.current && serverRef.current) {
+        previewRefreshPending.current = false;
+        schedulePreview(serverRef.current);
       }
     });
-  }, [invalidatePlan, schedulePreview]);
+    return saveChain.current;
+  }, [invalidatePlan, schedulePreview, syncSaving]);
+  const queuePersistence = useCallback((theme: ThemeSpec, label: string, phase: ThemeChangePhase) => {
+    const current = serverRef.current;
+    if (!current) return;
+    pendingPersist.current = { designId: current.id, theme: cloneTheme(theme), label, draftVersion: draftVersion.current };
+    previewRefreshPending.current = true;
+    if (persistTimer.current !== undefined) clearTimeout(persistTimer.current);
+    if (phase === "continuous") {
+      persistTimer.current = window.setTimeout(() => {
+        persistTimer.current = undefined;
+        void flushPersistence();
+      }, PERSIST_DEBOUNCE_MS);
+    } else {
+      persistTimer.current = undefined;
+      void flushPersistence();
+    }
+    syncSaving();
+  }, [flushPersistence, syncSaving]);
+  const enqueueTheme = useCallback((next: ThemeSpec, label: string, phase: ThemeChangePhase = "immediate", remember = true) => {
+    const draft = draftRef.current;
+    if (!serverRef.current || !draft) return;
+    const shouldRemember = remember && (phase !== "continuous" || !continuousEdit.current);
+    if (shouldRemember) { setHistory((items) => [...items.slice(-29), cloneTheme(draft)]); setFuture([]); }
+    continuousEdit.current = phase === "continuous" ? true : false;
+    draftVersion.current += 1;
+    draftRef.current = cloneTheme(next);
+    setDesign((current) => current ? { ...current, theme: next } : current);
+    invalidatePlan("草稿已修改，当前写入计划已失效。草稿画布已即时更新，正在合并温隔离预览刷新。");
+    queuePersistence(next, label, phase);
+  }, [invalidatePlan, queuePersistence]);
 
   const selectDesign = async (id: string) => { if (id === design?.id) return; const next = await api.design(id); setHistory([]); setFuture([]); replaceDesign(next); invalidatePlan("已切换设计，当前写入计划已失效。"); setNotice({ tone: "neutral", message: `已切换到 ${next.name} · r${next.revision}；正在连接温隔离预览。` }); schedulePreview(next, 0); };
   const createDesign = async () => { const next = await api.createDesign(`未命名皮肤 ${designs.length + 1}`); replaceDesign(next); schedulePreview(next, 0); };
@@ -280,8 +415,8 @@ export function App() {
   const deleteDesign = async (id: string) => { if (designs.length < 2) return; await api.deleteDesign(id); const nextItems = designs.filter((item) => item.id !== id); setDesigns(nextItems); if (design?.id === id) { replaceDesign(nextItems[0]!); schedulePreview(nextItems[0]!, 0); } };
   const renameDesign = async (name: string) => { const base = serverRef.current; if (!base || !name.trim() || name.trim() === base.name) return; try { replaceDesign(await api.renameDesign(base.id, name.trim(), base.revision)); invalidatePlan("设计名称已更新，当前写入计划已失效。"); } catch (error) { setNotice({ tone: "danger", message: error instanceof Error ? error.message : "重命名失败" }); } };
   const renameDesignById = async (id: string, name: string) => { const target = designs.find((item) => item.id === id); if (!target || !name.trim() || name.trim() === target.name) return; try { const updated = await api.renameDesign(id, name.trim(), target.revision); setDesigns((items) => items.map((item) => item.id === id ? updated : item)); if (design?.id === id) replaceDesign(updated); invalidatePlan("设计名称已更新，当前写入计划已失效。"); } catch (error) { setNotice({ tone: "danger", message: error instanceof Error ? error.message : "重命名失败" }); } };
-  const undo = () => { const previous = history.at(-1); const current = draftRef.current; if (!previous || !current) return; setHistory((items) => items.slice(0, -1)); setFuture((items) => [...items, cloneTheme(current)]); enqueueTheme(previous, "撤销", false); };
-  const redo = () => { const next = future.at(-1); const current = draftRef.current; if (!next || !current) return; setFuture((items) => items.slice(0, -1)); setHistory((items) => [...items, cloneTheme(current)]); enqueueTheme(next, "重做", false); };
+  const undo = () => { const previous = history.at(-1); const current = draftRef.current; if (!previous || !current) return; setHistory((items) => items.slice(0, -1)); setFuture((items) => [...items, cloneTheme(current)]); enqueueTheme(previous, "撤销", "immediate", false); };
+  const redo = () => { const next = future.at(-1); const current = draftRef.current; if (!next || !current) return; setFuture((items) => items.slice(0, -1)); setHistory((items) => [...items, cloneTheme(current)]); enqueueTheme(next, "重做", "immediate", false); };
   const upload = async (file: File, region: BackgroundRegion) => {
     if (!draftRef.current) return;
     if (file.size > 4 * 1024 * 1024) throw new Error("图片文件超过 4MB 上限；请压缩后重试。");
@@ -301,7 +436,7 @@ export function App() {
     enqueueTheme(setRegionsDivider(current, divider), divider ? "已增加区域分隔线" : current.appearance.regions.linked ? "已移除分隔线；背景保持一体" : "已移除分隔线；两区域边缘将柔和过渡");
     setNotice({ tone: "success", message: divider ? "已增加区域分隔线。" : current.appearance.regions.linked ? "已移除分隔线；背景保持一体。" : "已移除分隔线；两区域背景会在边界柔和过渡。" });
   }, [enqueueTheme]);
-  const refreshPreview = async () => { await saveChain.current; schedulePreview(serverRef.current ?? undefined, 0); };
+  const refreshPreview = async () => { await flushPersistence(); await saveChain.current; schedulePreview(serverRef.current ?? undefined, 0); };
   const previewHasApplyGrace = (session: PreviewSession | null | undefined) => Boolean(session && Date.parse(session.expiresAt) - Date.now() > PREVIEW_RENEWAL_LEAD_MS);
   const previewWorkPending = previewTimer.current !== undefined || previewInFlight.current || queuedPreview.current !== null;
   const canApply = Boolean(design && status?.capabilities.compatible && preview === "live" && previewHasApplyGrace(verifiedPreview) && !previewWorkPending && exactEvidence(verifiedPreview, design) && sameSession(verifiedPreview, previewSession) && !saving);
@@ -345,6 +480,7 @@ export function App() {
     activeOperationId.current = null; applyPlanRef.current = null; setApplyAction(action); setApplyResult("idle"); setApplyError(undefined); setApplyPlan(null); setActiveOperation(null); setApplyPlanLoading(true);
     void (async () => {
       try {
+        await flushPersistence();
         await saveChain.current;
         const current = serverRef.current;
         if (!current) throw new Error("当前设计尚未载入");
@@ -389,6 +525,7 @@ export function App() {
   const runApply = async () => {
     if (!design || !applyAction) return; setApplyBusy(true);
     try {
+      await flushPersistence();
       await saveChain.current;
       const current = serverRef.current;
       if (!current) throw new Error("当前设计尚未载入");
@@ -424,12 +561,13 @@ export function App() {
     </div>
     <StatusBar status={status} design={design} preview={preview} notice={notice} mobileTab={mobileTab} onMobileTab={setMobileTab} />
     <ApplyDialog open={applyAction !== null} action={applyAction ?? "apply"} design={design} status={status} plan={applyPlan} planLoading={applyPlanLoading} operation={activeOperation} busy={applyBusy} result={applyResult} previewReady={applyAction === "restore" ? Boolean(status?.capabilities.compatible) : canApply} {...(applyError ? { error: applyError } : {})} onClose={() => { applyActionRef.current = null; setApplyAction(null); }} onRetryPlan={() => openApply(applyAction ?? "apply")} onConfirm={() => void runApply()} />
-    <ConflictDialog mine={conflictMine} latest={conflictLatest} onClose={() => { setConflictMine(null); setConflictLatest(null); }} onLatest={() => { if (conflictLatest) { replaceDesign(conflictLatest); schedulePreview(conflictLatest, 0); } setConflictMine(null); setConflictLatest(null); }} onReplay={() => { if (conflictMine) enqueueTheme(conflictMine, "冲突重放", false); setConflictMine(null); setConflictLatest(null); }} />
+    <ConflictDialog mine={conflictMine} latest={conflictLatest} onClose={() => { setConflictMine(null); setConflictLatest(null); }} onLatest={() => { if (conflictLatest) { replaceDesign(conflictLatest); schedulePreview(conflictLatest, 0); } setConflictMine(null); setConflictLatest(null); }} onReplay={() => { if (conflictMine) enqueueTheme(conflictMine, "冲突重放", "immediate", false); setConflictMine(null); setConflictLatest(null); }} />
   </div>;
 }
 
 function samePreviewIdentity(left: PreviewSession | null | undefined, right: PreviewSession | null | undefined): boolean { return Boolean(left && right && left.sessionId === right.sessionId); }
 function sameSession(left: PreviewSession | null | undefined, right: PreviewSession | null | undefined): boolean { return Boolean(samePreviewIdentity(left, right) && left!.generation === right!.generation); }
+function sameTheme(left: ThemeSpec, right: ThemeSpec): boolean { return JSON.stringify(left) === JSON.stringify(right); }
 function currentReceipt(verified: PreviewSession | null, active: PreviewSession | null, design: DesignSession): PreviewReceiptBinding | null {
   if (!verified || !sameSession(verified, active) || verified.state !== "live" || verified.designId !== design.id || verified.revision !== design.revision || !/^[0-9a-f]{64}$/i.test(verified.renderReceiptHash ?? "")) return null;
   return { previewSessionId: verified.sessionId, previewGeneration: verified.generation, renderReceiptHash: verified.renderReceiptHash! };

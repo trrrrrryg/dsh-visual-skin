@@ -1,5 +1,12 @@
 # Change notes
 
+## 2026-08-20 — Complete Open Platform quota history and Codex-style usage view
+
+- Added a full 2024-01-to-current-month import from the signed-in DeepSeek Open Platform browser session, including daily input/cache/output tokens, cost, request counts, and per-model totals. The importer understands Chromium LevelDB WAL/table records, rejects ambiguous multi-profile accounts, and never persists the session token in a plugin credential file.
+- Upgraded the local usage ledger to a transactional v2 schema with separate local and official buckets, migration/corruption backups, serialized writes, idempotent official replacement, and official-data precedence without discarding live local observations.
+- Rebuilt the settings page around a five-segment Codex-style summary, a rolling 12-month daily activity grid, and a ranked model breakdown. Added keyboard navigation, detailed accessible labels/tooltips, sync states, and compact responsive sizing for the Harness settings dialog.
+- Real account verification: all 32 months from 2024-01 through 2026-08 synchronized with zero failed months; a repeat synchronization produced the same totals. Full suite: 40/40 green; quota-specific suite: 11/11 green; reviewer reported no remaining findings.
+
 ## 2026-08-19 — Fix settings card crash (React element contract)
 
 - **Root cause**: the settings card factory returned a raw `HTMLLIElement` (plain-DOM attempt to avoid `react/jsx-runtime`), but DSH's slots renderer mounts `settings.plugin.item` entries as **React children** — a DOM node crashes with `Minified React error #31` and the slot entry is dropped ("皮肤设置" card disappeared while balance/backdrop features kept working).

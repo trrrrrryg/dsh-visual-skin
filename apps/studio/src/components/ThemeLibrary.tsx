@@ -46,7 +46,6 @@ export function ThemeLibrary({ designs, currentId, drawerOpen, onClose, onSelect
       <span className="sr-only">搜索主题</span>
       <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索主题" />
     </label>
-    <div className="library-filters" aria-label="主题筛选"><button aria-pressed="true">全部</button><button disabled>草稿</button><button disabled>已应用</button></div>
     <div className="theme-list">
       {filtered.map((design) => {
         const backdrop = design.theme.appearance.backdrop;

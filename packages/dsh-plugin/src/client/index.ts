@@ -744,7 +744,9 @@ function createBoundaryDecoration(targets: RegionTargets, kind: "divider" | "ble
   element.dataset.dshSkinStudioBoundary = kind;
   Object.assign(element.style, {
     position: "absolute",
-    zIndex: kind === "divider" ? "2" : "1",
+    // The dynamic divider is only a backdrop decoration. It must never sit
+    // above DSH's settings portal or other foreground surfaces.
+    zIndex: kind === "divider" ? "0" : "1",
     pointerEvents: "none",
     background,
     ...(kind === "divider"
@@ -913,11 +915,12 @@ function installRegionBridge(targets: Record<RegionName, HTMLElement> & { compos
   type OverlayName = RegionName | "linked";
   type OverlaySpec = { name: OverlayName; target: HTMLElement; select: RegionName; affects: RegionName[]; label: string };
   const regionNames: RegionName[] = ["sidebar", "main"];
-  // A linked backdrop is one canvas and one edit target. Present one complete
-  // blue selection frame rather than two nearly adjacent outlines, which can
-  // disappear against a unified background and incorrectly suggest a split.
+  // A linked backdrop has no region choice: every Inspector change is already
+  // applied to both surfaces.  Do not create a picker or hover outline in this
+  // state; the picker exists only after the designer explicitly switches to
+  // split editing.
   const specs: OverlaySpec[] = initiallyLinked
-    ? [{ name: "linked", target: targets.composite, select: "main", affects: regionNames, label: "选择整合两区域皮肤" }]
+    ? []
     : regionNames.map((region) => ({ name: region, target: targets[region], select: region, affects: [region], label: `选择${region === "sidebar" ? "左侧栏" : "主工作区"}皮肤` }));
   const overlays = new Map<OverlayName, HTMLButtonElement>();
   const updateOverlayBounds = () => {
@@ -985,20 +988,21 @@ function installRegionBridge(targets: Record<RegionName, HTMLElement> & { compos
   toolbar.style.cssText = "position:fixed;top:13px;right:138px;z-index:2147483647;display:flex;align-items:center;gap:8px;padding:5px 9px;border:1px solid #397fb8;border-radius:6px;background:#11283ce8;color:#eaf6ff;font:12px sans-serif";
   const selectorButton = document.createElement("button");
   selectorButton.type = "button"; selectorButton.textContent = "选择区域"; selectorButton.setAttribute("aria-pressed", "false"); selectorButton.style.cssText = "border:1px solid #4c94cb;border-radius:4px;background:#173a56;color:#eaf6ff;padding:3px 6px;font:inherit;cursor:pointer";
-  selectorButton.addEventListener("click", () => setSelecting(!selecting));
+  if (!initiallyLinked) selectorButton.addEventListener("click", () => setSelecting(!selecting));
   const checkbox = document.createElement("label");
   checkbox.dataset.dshSkinRegionLink = "1";
   checkbox.style.cssText = "display:flex;align-items:center;gap:6px;cursor:pointer";
   const input = document.createElement("input"); input.type = "checkbox"; input.checked = initiallyLinked;
-  checkbox.append(input, document.createTextNode("整合两区域")); toolbar.append(selectorButton, checkbox); document.body.append(toolbar); updateOverlayBounds();
+  checkbox.append(input, document.createTextNode("整合两区域"));
+  if (!initiallyLinked) toolbar.append(selectorButton);
+  toolbar.append(checkbox); document.body.append(toolbar); updateOverlayBounds();
   const resizeObserver = new ResizeObserver(updateOverlayBounds); for (const target of [targets.sidebar, targets.main, targets.composite]) resizeObserver.observe(target);
   addEventListener("resize", updateOverlayBounds); addEventListener("scroll", updateOverlayBounds, true);
   const changed = () => emit("regions-linked", input.checked);
   input.addEventListener("change", changed); cleanups.push(() => { input.removeEventListener("change", changed); document.removeEventListener("pointermove", trackPassiveHover, true); selectorButton.replaceWith(); resizeObserver.disconnect(); removeEventListener("resize", updateOverlayBounds); removeEventListener("scroll", updateOverlayBounds, true); toolbar.remove(); style.remove(); });
-  // This is the Studio's disposable design surface: make the requested
-  // hover-and-click region picker immediately available. The adjacent control
-  // still lets a designer end selection and use the embedded DSH normally.
-  setSelecting(true);
+  // Split editing is the only mode that needs a region picker. Linked editing
+  // intentionally leaves the embedded DSH free of selection chrome.
+  if (!initiallyLinked) setSelecting(true);
   return { dispose: () => cleanups.splice(0).forEach((cleanup) => cleanup()) };
 }
 function isRegionalLayoutNode(node: Node, owned?: RegionalBackdrop): boolean {
@@ -1221,11 +1225,49 @@ function installSkinSettingsCard(ctx: ClientContextLike): void {
   slots.inject("settings.plugin.item", () => slots.register({ name: "settings.plugin.item", id: "dsh-skin-studio", order: 30, label: "皮肤设置", registrant: "@dsh-skin/dsh-plugin" }, card));
 }
 
-interface QuotaDayView { date: string; inputTokens: number; outputTokens: number; cacheReadTokens: number; reasoningTokens: number; cost: number; requests: number }
-interface QuotaUsagePayload { ok?: boolean; month?: string; today?: QuotaDayView; monthTotal?: QuotaDayView; days?: QuotaDayView[]; estimated?: boolean; queriedAt?: string }
-interface QuotaCell { date: string; day: number; usage: QuotaDayView | null; future: boolean }
+interface QuotaTotals {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  reasoningTokens: number;
+  cost: number;
+  requests: number;
+  models?: Record<string, QuotaTotals>;
+  source?: string;
+}
+interface QuotaDayView extends QuotaTotals { date: string }
+interface QuotaUsagePayload {
+  ok: boolean;
+  from: string;
+  to: string;
+  today: QuotaDayView;
+  monthTotal: QuotaTotals;
+  rangeTotal: QuotaTotals;
+  models: Record<string, QuotaTotals>;
+  days: QuotaDayView[];
+  source: string;
+  estimated: boolean;
+  syncedAt?: string;
+  queriedAt: string;
+}
+interface QuotaImportPayload {
+  ok: boolean;
+  partial: boolean;
+  from: string;
+  to: string;
+  succeededMonths: string[];
+  failedMonths: Array<{ month: string; code: string; message: string }>;
+  importedDays: number;
+  cost: number;
+  tokens: number;
+  requests: number;
+  queriedAt: string;
+  error?: { code?: string; message?: string };
+}
+interface QuotaHeatCell { date: string; usage: QuotaDayView | null; future: boolean; inRange: boolean; week: number }
+interface QuotaHeatmap { cells: QuotaHeatCell[]; weeks: number; months: Array<{ label: string; week: number }> }
 
-function quotaTotalTokens(day: QuotaDayView | undefined): number {
+function quotaTotalTokens(day: QuotaTotals | undefined): number {
   if (!day) return 0;
   return (day.inputTokens ?? 0) + (day.outputTokens ?? 0) + (day.cacheReadTokens ?? 0);
 }
@@ -1243,6 +1285,8 @@ function quotaMonthLabel(key: string): string {
 }
 function quotaFormatTokens(value: number): string {
   const n = Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+  if (n >= 100_000_000) return `${(n / 100_000_000).toFixed(n >= 1_000_000_000 ? 1 : 2).replace(/\.?0+$/, "")}亿`;
+  if (n >= 10_000) return `${(n / 10_000).toFixed(n >= 1_000_000 ? 1 : 2).replace(/\.?0+$/, "")}万`;
   return n.toLocaleString("zh-CN");
 }
 function quotaFormatCost(value: number): string {
@@ -1250,33 +1294,67 @@ function quotaFormatCost(value: number): string {
   if (value >= 100) return `¥${value.toFixed(2)}`;
   return `¥${value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "")}`;
 }
-/** Monday-first calendar cells for one month; leading blanks align weekdays. */
-function quotaMonthCells(month: string, days: QuotaDayView[] | undefined, todayKey: string): (QuotaCell | null)[] {
-  const match = /^(\d{4})-(\d{2})$/.exec(month);
-  if (!match) return [];
-  const year = Number(match[1]);
-  const monthIndex = Number(match[2]) - 1;
-  if (monthIndex < 0 || monthIndex > 11) return [];
-  const leading = (new Date(year, monthIndex, 1).getDay() + 6) % 7;
-  const daysInMonth = new Date(year, monthIndex + 1, 0).getDate();
-  const byDate = new Map<string, QuotaDayView>();
-  for (const day of days ?? []) if (day && typeof day.date === "string") byDate.set(day.date, day);
-  const cells: (QuotaCell | null)[] = [];
-  for (let i = 0; i < leading; i += 1) cells.push(null);
-  for (let day = 1; day <= daysInMonth; day += 1) {
-    const date = `${month}-${String(day).padStart(2, "0")}`;
-    cells.push({ date, day, usage: byDate.get(date) ?? null, future: date > todayKey });
+function quotaSourceLabel(source: string | undefined): string {
+  if (source === "official") return "开放平台";
+  if (source === "mixed") return "开放平台 + 本地估算";
+  if (source === "local") return "本地估算";
+  return source || "未知来源";
+}
+function quotaLocalDate(key: string): Date | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key);
+  if (!match) return null;
+  const value = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 12);
+  return value.getFullYear() === Number(match[1]) && value.getMonth() === Number(match[2]) - 1 && value.getDate() === Number(match[3]) ? value : null;
+}
+function quotaHeatmap(from: string, to: string, days: QuotaDayView[], todayKey: string): QuotaHeatmap {
+  const fromMatch = /^(\d{4})-(\d{2})$/.exec(from);
+  const toMatch = /^(\d{4})-(\d{2})$/.exec(to);
+  if (!fromMatch || !toMatch) return { cells: [], weeks: 0, months: [] };
+  const rangeStart = new Date(Number(fromMatch[1]), Number(fromMatch[2]) - 1, 1, 12);
+  const monthEnd = new Date(Number(toMatch[1]), Number(toMatch[2]), 0, 12);
+  const today = quotaLocalDate(todayKey);
+  const rangeEnd = today && quotaMonthKey(today) === to ? today : monthEnd;
+  const startRow = (rangeStart.getDay() + 6) % 7;
+  const cursor = new Date(rangeStart.getFullYear(), rangeStart.getMonth(), 1 - startRow, 12);
+  const endRow = (rangeEnd.getDay() + 6) % 7;
+  const final = new Date(rangeEnd.getFullYear(), rangeEnd.getMonth(), rangeEnd.getDate() + (6 - endRow), 12);
+  const byDate = new Map(days.map((day) => [day.date, day]));
+  const cells: QuotaHeatCell[] = [];
+  const months: Array<{ label: string; week: number }> = [];
+  let week = 0;
+  while (cursor <= final) {
+    const date = quotaDayKey(cursor);
+    const month = quotaMonthKey(cursor);
+    const inRange = month >= from && month <= to && cursor >= rangeStart && cursor <= rangeEnd;
+    if (inRange && cursor.getDate() === 1) months.push({ label: `${cursor.getMonth() + 1}月`, week });
+    cells.push({ date, usage: byDate.get(date) ?? null, future: date > todayKey, inRange, week });
+    const next = new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate() + 1, 12);
+    cursor.setTime(next.getTime());
+    if (cursor.getDay() === 1) week += 1;
   }
-  return cells;
+  return { cells, weeks: week + 1, months };
+}
+function quotaSum(days: QuotaDayView[]): QuotaTotals {
+  return days.reduce<QuotaTotals>((sum, day) => ({
+    inputTokens: sum.inputTokens + (day.inputTokens ?? 0),
+    outputTokens: sum.outputTokens + (day.outputTokens ?? 0),
+    cacheReadTokens: sum.cacheReadTokens + (day.cacheReadTokens ?? 0),
+    reasoningTokens: sum.reasoningTokens + (day.reasoningTokens ?? 0),
+    cost: sum.cost + (day.cost ?? 0),
+    requests: sum.requests + (day.requests ?? 0)
+  }), { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, reasoningTokens: 0, cost: 0, requests: 0 });
+}
+function quotaIntensity(tokens: number, maxTokens: number): number {
+  if (tokens <= 0 || maxTokens <= 0) return 0;
+  return Math.max(1, Math.min(4, Math.ceil(Math.log1p(tokens) / Math.log1p(maxTokens) * 4)));
 }
 
 /**
  * 额度查看 settings section — the single balance/usage surface since the
  * composer chip and sidebar button were removed. Registered as its own
  * settings nav section (between 插件 and Agent 预设). Shows the current
- * balance, today's consumed quota (estimated ¥) and tokens, this month's
- * tokens, and a day grid (gray = no usage, blue = used; hover shows the
- * day's quota/tokens).
+ * balance, a 12-month token activity heatmap, model attribution, and a
+ * full-history official-platform synchronization action.
  */
 function installQuotaSettingsSection(ctx: ClientContextLike): void {
   const slots = ctx.slots ?? ctx.get?.("slots") as SlotsLike | undefined;
@@ -1296,28 +1374,38 @@ function installQuotaSettingsSection(ctx: ClientContextLike): void {
     const [balance, setBalance] = react.useState<BalanceValue | null | undefined>(readStoredBalance());
     const [balanceFailed, setBalanceFailed] = react.useState(false);
     const [usage, setUsage] = react.useState<QuotaUsagePayload | null>(null);
-    const [usageFailed, setUsageFailed] = react.useState(false);
-    const [month, setMonth] = react.useState(quotaMonthKey());
-    const [hover, setHover] = react.useState<{ x: number; y: number; cell: QuotaCell } | null>(null);
+    const [usageFailed, setUsageFailed] = react.useState<string | null>(null);
+    const [hover, setHover] = react.useState<{ x: number; y: number; cell: QuotaHeatCell; mode: "pointer" | "keyboard" } | null>(null);
+    const [activeDate, setActiveDate] = react.useState(quotaDayKey());
+    const [focusedDate, setFocusedDate] = react.useState<string | null>(null);
     const [refreshing, setRefreshing] = react.useState(false);
+    const [importing, setImporting] = react.useState(false);
+    const [importNotice, setImportNotice] = react.useState<{ tone: "success" | "warn" | "error"; message: string } | null>(null);
     const todayKey = quotaDayKey();
-    const loadUsage = (targetMonth: string) => {
-      setUsageFailed(false);
-      fetch(`/dsh-skin/usage?month=${encodeURIComponent(targetMonth)}`, { credentials: "same-origin", cache: "no-store" })
-        .then((response) => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.json() as Promise<QuotaUsagePayload>; })
-        .then((payload) => { if (payload && payload.ok === true) setUsage(payload); else setUsageFailed(true); })
-        .catch(() => setUsageFailed(true));
+    const currentMonth = quotaMonthKey();
+    const fromMonth = quotaMonthKey(new Date(new Date().getFullYear(), new Date().getMonth() - 11, 1));
+    const loadUsage = async () => {
+      setUsageFailed(null);
+      try {
+        const response = await fetch(`/dsh-skin/usage?from=${encodeURIComponent(fromMonth)}&to=${encodeURIComponent(currentMonth)}`, { credentials: "same-origin", cache: "no-store" });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const payload = await response.json() as QuotaUsagePayload;
+        if (!payload || payload.ok !== true || !Array.isArray(payload.days)) throw new Error("响应数据无效");
+        setUsage(payload);
+      } catch (error) {
+        setUsageFailed(error instanceof Error ? error.message : "无法读取用量");
+      }
     };
     react.useEffect(() => {
       let cancelled = false;
       setUsage(null);
-      setUsageFailed(false);
-      fetch(`/dsh-skin/usage?month=${encodeURIComponent(month)}`, { credentials: "same-origin", cache: "no-store" })
+      setUsageFailed(null);
+      fetch(`/dsh-skin/usage?from=${encodeURIComponent(fromMonth)}&to=${encodeURIComponent(currentMonth)}`, { credentials: "same-origin", cache: "no-store" })
         .then((response) => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.json() as Promise<QuotaUsagePayload>; })
-        .then((payload) => { if (cancelled) return; if (payload && payload.ok === true) setUsage(payload); else setUsageFailed(true); })
-        .catch(() => { if (!cancelled) setUsageFailed(true); });
+        .then((payload) => { if (cancelled) return; if (payload && payload.ok === true && Array.isArray(payload.days)) setUsage(payload); else setUsageFailed("响应数据无效"); })
+        .catch((error) => { if (!cancelled) setUsageFailed(error instanceof Error ? error.message : "无法读取用量"); });
       return () => { cancelled = true; };
-    }, [month]);
+    }, []);
     react.useEffect(() => {
       let cancelled = false;
       fetchBalanceValue(false).then((value) => {
@@ -1327,22 +1415,47 @@ function installQuotaSettingsSection(ctx: ClientContextLike): void {
       });
       return () => { cancelled = true; };
     }, []);
-    const refresh = () => {
-      setRefreshing(true);
-      fetchBalanceValue(true).then((value) => {
-        if (value) { setBalance(value); setBalanceFailed(false); writeStoredBalance(value); }
-        else setBalanceFailed(true);
-      });
-      loadUsage(month);
-      window.setTimeout(() => setRefreshing(false), 600);
+    const loadBalance = async (force: boolean) => {
+      const value = await fetchBalanceValue(force);
+      if (value) { setBalance(value); setBalanceFailed(false); writeStoredBalance(value); }
+      else setBalanceFailed(true);
     };
-    const changeMonth = (delta: number) => {
-      setMonth((prev) => {
-        const match = /^(\d{4})-(\d{2})$/.exec(prev);
-        if (!match) return prev;
-        const next = quotaMonthKey(new Date(Number(match[1]), Number(match[2]) - 1 + delta, 1));
-        return next > quotaMonthKey() ? prev : next;
-      });
+    const refresh = async () => {
+      setRefreshing(true);
+      await Promise.allSettled([loadBalance(true), loadUsage()]);
+      setRefreshing(false);
+    };
+    const importAll = async () => {
+      setImporting(true);
+      setImportNotice(null);
+      try {
+        const response = await fetch("/dsh-skin/usage/import", {
+          method: "POST",
+          credentials: "same-origin",
+          cache: "no-store",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ scope: "all", fromMonth: "2024-01", toMonth: currentMonth })
+        });
+        const payload = await response.json().catch(() => null) as QuotaImportPayload | null;
+        if (!payload) throw new Error(`HTTP ${response.status}`);
+        const authMissing = payload.error?.code === "TOKEN_UNAVAILABLE" || payload.failedMonths?.some((item) => item.code === "TOKEN_UNAVAILABLE");
+        if (authMissing) {
+          setImportNotice({ tone: "error", message: "未检测到开放平台登录状态。请先在本机浏览器登录 platform.deepseek.com 后重试。" });
+        } else if (payload.ok) {
+          setImportNotice({ tone: "success", message: `同步完成：${payload.succeededMonths.length} 个月 · ${payload.importedDays} 天 · ${quotaFormatTokens(payload.tokens)} Token · ${quotaFormatCost(payload.cost)} · ${payload.requests} 次请求` });
+        } else if (payload.partial) {
+          const examples = payload.failedMonths.slice(0, 3).map((item) => `${item.month}：${item.message}`).join("；");
+          setImportNotice({ tone: "warn", message: `部分同步完成：成功 ${payload.succeededMonths.length} 个月，失败 ${payload.failedMonths.length} 个月${examples ? `。${examples}${payload.failedMonths.length > 3 ? "；其余失败月份未展开" : ""}` : ""}` });
+        } else {
+          const detail = payload.error?.message ?? payload.failedMonths?.[0]?.message ?? `HTTP ${response.status}`;
+          setImportNotice({ tone: "error", message: `同步失败：${detail}` });
+        }
+        await loadUsage();
+      } catch (error) {
+        setImportNotice({ tone: "error", message: `同步失败：${error instanceof Error ? error.message : "无法连接本地服务"}` });
+      } finally {
+        setImporting(false);
+      }
     };
     const balanceValue = balance ?? null;
     const balanceText = balanceValue === null ? "查询失败" : `${balanceSymbol(balanceValue.currency)}${formatBalance(balanceValue.total)}`;
@@ -1350,85 +1463,143 @@ function installQuotaSettingsSection(ctx: ClientContextLike): void {
       ? `已充值 ${balanceSymbol(balanceValue.currency)}${formatBalance(balanceValue.toppedUp)} · 赠送 ${balanceSymbol(balanceValue.currency)}${formatBalance(balanceValue.granted)}${balanceFailed ? " · 余额刷新失败" : ""}`
       : balanceFailed ? "余额查询失败，点击右上角刷新重试" : "正在查询余额…";
     const today = usage?.today;
-    const monthTotal = usage?.monthTotal;
-    const todayCost = today?.cost ?? 0;
+    const currentMonthTotal = quotaSum((usage?.days ?? []).filter((day) => day.date.startsWith(`${currentMonth}-`)));
+    const rangeTokens = quotaTotalTokens(usage?.rangeTotal);
     const todayTokens = quotaTotalTokens(today);
-    const monthTokens = quotaTotalTokens(monthTotal);
-    const cells = quotaMonthCells(month, usage?.days, todayKey);
-    const monthHasUsage = (monthTotal?.requests ?? 0) > 0;
+    const monthTokens = quotaTotalTokens(currentMonthTotal);
+    const peakTokens = (usage?.days ?? []).reduce((peak, day) => Math.max(peak, quotaTotalTokens(day)), 0);
+    const heatmap = quotaHeatmap(fromMonth, currentMonth, usage?.days ?? [], todayKey);
+    const maxDayTokens = peakTokens;
+    const models = Object.entries(usage?.models ?? {}).map(([name, totals]) => ({ name, totals, tokens: quotaTotalTokens(totals) })).filter((model) => model.tokens > 0 || model.totals.cost > 0 || model.totals.requests > 0).sort((a, b) => b.tokens - a.tokens || b.totals.cost - a.totals.cost || a.name.localeCompare(b.name));
     const sectionStyle = { maxWidth: "760px", display: "flex", flexDirection: "column", gap: "12px", padding: "4px 0 20px" };
     const cardStyle = { border: "1px solid var(--dsw-alias-border-l2)", background: "var(--dsw-alias-bg-layer-3)", borderRadius: "12px", padding: "16px" };
     const titleStyle = { color: "var(--dsw-alias-label-primary)", fontSize: "15px", fontWeight: 600, lineHeight: 1.4 };
     const descriptionStyle = { color: "var(--dsw-alias-label-tertiary)", fontSize: "13px", lineHeight: 1.5, marginTop: "4px" };
-    const statBlock = (label: string, value: string) => jsx.jsxs("div", { style: { border: "1px solid var(--dsw-alias-border-l1)", background: "var(--dsw-alias-bg-layer-2)", borderRadius: "10px", padding: "10px" }, children: [
-      jsx.jsx("div", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: "11px", lineHeight: 1.4 }, children: label }),
-      jsx.jsx("div", { style: { color: "var(--dsw-alias-label-primary)", fontSize: "15px", fontWeight: 600, marginTop: "4px", fontVariantNumeric: "tabular-nums" }, children: value })
+    const statBlock = (label: string, value: string, index: number) => jsx.jsxs("div", { style: { flex: "1 1 0", minWidth: 0, padding: "10px 6px", textAlign: "center", borderInlineStart: index > 0 ? "1px solid var(--dsw-alias-border-l1)" : "0" }, children: [
+      jsx.jsx("div", { style: { color: "var(--dsw-alias-label-primary)", fontSize: "14px", fontWeight: 600, fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }, children: value }),
+      jsx.jsx("div", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: "11px", lineHeight: 1.4, marginTop: "3px", whiteSpace: "nowrap" }, children: label })
     ] });
-    const monthNav = (label: string, delta: number) => jsx.jsx("button", {
-      type: "button",
-      onClick: () => changeMonth(delta),
-      style: { border: "0", borderRadius: "6px", padding: "2px 8px", background: "transparent", color: "var(--dsw-alias-label-secondary)", font: "inherit", fontSize: "13px", lineHeight: 1.6, cursor: "pointer" },
-      children: label
-    });
-    const legendItem = (color: string, label: string) => jsx.jsxs("span", { style: { display: "inline-flex", alignItems: "center", gap: "4px" }, children: [
-      jsx.jsx("span", { style: { width: "10px", height: "10px", borderRadius: "3px", background: color, display: "inline-block" } }),
-      jsx.jsx("span", { children: label })
-    ] });
-    return jsx.jsxs("div", { style: sectionStyle, "data-dsh-skin-quota-section": "1", children: [
+    const handleCellKey = (event: { key: string; preventDefault: () => void; stopPropagation: () => void; currentTarget: HTMLElement }) => {
+      if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setHover(null); return; }
+      const grid = event.currentTarget.closest('[role="grid"]');
+      const buttons = grid ? Array.from(grid.querySelectorAll<HTMLElement>("button[data-quota-date]")) : [];
+      const index = buttons.indexOf(event.currentTarget);
+      let next = index;
+      if (event.key === "ArrowUp") next -= 1;
+      else if (event.key === "ArrowDown") next += 1;
+      else if (event.key === "ArrowLeft") next -= 7;
+      else if (event.key === "ArrowRight") next += 7;
+      else if (event.key === "Home") next = 0;
+      else if (event.key === "End") next = buttons.length - 1;
+      else return;
+      event.preventDefault();
+      const target = buttons[Math.max(0, Math.min(buttons.length - 1, next))];
+      if (target) { setActiveDate(target.dataset.quotaDate ?? todayKey); target.focus(); }
+    };
+    const busy = refreshing || importing || usage === null;
+    return jsx.jsxs("div", { style: sectionStyle, "data-dsh-skin-quota-section": "1", "aria-busy": busy, children: [
       jsx.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between" }, children: [
         jsx.jsx("div", { style: { ...titleStyle, fontSize: "16px" }, children: "额度查看" }),
-        jsx.jsx("button", { type: "button", onClick: refresh, style: { border: "0", borderRadius: "8px", padding: "5px 12px", color: "var(--dsw-alias-label-secondary)", background: "var(--dsw-alias-bg-layer-2)", font: "inherit", fontSize: "12px", cursor: "pointer" }, children: refreshing ? "刷新中…" : "刷新" })
+        jsx.jsx("button", { type: "button", onClick: () => { void refresh(); }, disabled: refreshing || importing, "aria-busy": refreshing, style: { border: "1px solid var(--dsw-alias-border-l1)", borderRadius: "8px", minHeight: "32px", padding: "5px 12px", color: "var(--dsw-alias-label-secondary)", background: "var(--dsw-alias-bg-layer-2)", font: "inherit", fontSize: "12px", cursor: refreshing || importing ? "not-allowed" : "pointer", opacity: refreshing || importing ? 0.55 : 1 }, children: refreshing ? "刷新中…" : "刷新" })
       ] }),
       jsx.jsxs("div", { style: cardStyle, children: [
-      jsx.jsx("div", { style: { display: "flex", alignItems: "baseline", gap: "8px" }, children: [
-        jsx.jsx("span", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: "12px" }, children: "当前余额" }),
-        jsx.jsx("span", { style: { color: "var(--dsw-alias-label-primary)", fontSize: "22px", fontWeight: 700, fontVariantNumeric: "tabular-nums" }, children: balanceText })
-      ] }),
-      jsx.jsx("div", { style: descriptionStyle, children: balanceDetail }),
-      jsx.jsxs("div", { style: { display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "8px", marginTop: "14px" }, children: [
-        statBlock("今日消耗额度", quotaFormatCost(todayCost)),
-        statBlock("今日消耗 Token", quotaFormatTokens(todayTokens)),
-        statBlock("本月消耗 Token", quotaFormatTokens(monthTokens))
-      ] }),
-      jsx.jsxs("div", { style: { marginTop: "16px" }, children: [
-        jsx.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between" }, children: [
-          jsx.jsx("div", { style: { color: "var(--dsw-alias-label-primary)", fontSize: "13px", fontWeight: 600 }, children: "本月消耗 Token" }),
-          jsx.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "2px" }, children: [
-            monthNav("‹", -1),
-            jsx.jsx("span", { style: { color: "var(--dsw-alias-label-secondary)", fontSize: "12px", minWidth: "78px", textAlign: "center", fontVariantNumeric: "tabular-nums" }, children: quotaMonthLabel(month) }),
-            monthNav("›", 1)
-          ] })
+        jsx.jsx("div", { style: { display: "flex", alignItems: "baseline", gap: "8px", flexWrap: "wrap" }, children: [
+          jsx.jsx("span", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: "12px" }, children: "当前余额" }),
+          jsx.jsx("span", { style: { color: "var(--dsw-alias-label-primary)", fontSize: "22px", fontWeight: 700, fontVariantNumeric: "tabular-nums" }, children: balanceText })
         ] }),
-        jsx.jsxs("div", { style: { display: "flex", gap: "4px", marginTop: "10px" }, children: ["一", "二", "三", "四", "五", "六", "日"].map((weekday) => jsx.jsx("div", { style: { width: "26px", textAlign: "center", color: "var(--dsw-alias-label-caption)", fontSize: "11px", lineHeight: "20px" }, children: weekday })) }),
+        jsx.jsx("div", { style: descriptionStyle, children: balanceDetail })
+      ] }),
+      jsx.jsx("div", { style: { overflowX: "auto", border: "1px solid var(--dsw-alias-border-l1)", background: "var(--dsw-alias-bg-layer-3)", borderRadius: "14px" }, children:
+        jsx.jsxs("div", { style: { display: "flex", minWidth: "520px" }, children: [
+          statBlock("近 12 月 Token", quotaFormatTokens(rangeTokens), 0),
+          statBlock("峰值日 Token", quotaFormatTokens(peakTokens), 1),
+          statBlock("今日 Token", quotaFormatTokens(todayTokens), 2),
+          statBlock("本月 Token", quotaFormatTokens(monthTokens), 3),
+          statBlock("本月费用", quotaFormatCost(currentMonthTotal.cost), 4)
+        ] })
+      }),
+      jsx.jsxs("section", { style: cardStyle, "aria-labelledby": "dsh-quota-sync-title", children: [
+        jsx.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }, children: [
+          jsx.jsx("div", { id: "dsh-quota-sync-title", style: { color: "var(--dsw-alias-label-primary)", fontSize: "13px", fontWeight: 600 }, children: "开放平台用量" }),
+          jsx.jsx("button", {
+            type: "button",
+            onClick: () => { void importAll(); },
+            disabled: importing,
+            "aria-busy": importing,
+            style: { border: "0", borderRadius: "8px", minHeight: "34px", padding: "6px 12px", color: "#fff", background: "var(--dsw-alias-brand-primary, #2e7cf6)", font: "inherit", fontSize: "12px", fontWeight: 600, cursor: importing ? "not-allowed" : "pointer", opacity: importing ? 0.55 : 1, whiteSpace: "nowrap" },
+            children: importing ? "同步中…" : "同步开放平台"
+          })
+        ] }),
+        jsx.jsx("div", { style: descriptionStyle, children: importing ? `正在同步 2024-01 至 ${currentMonth}` : `读取本机浏览器登录会话，同步 2024-01 至 ${currentMonth} 的官方 Token、费用与模型数据。` }),
+        importNotice ? jsx.jsx("div", { role: "status", "aria-live": "polite", style: { ...descriptionStyle, marginTop: "8px", color: importNotice.tone === "error" ? "var(--dsw-alias-state-error-primary, #d92d20)" : importNotice.tone === "warn" ? "var(--dsw-alias-state-warn-primary, #b54708)" : "var(--dsw-alias-state-success-primary, #12805c)" }, children: importNotice.message }) : null
+      ] }),
+      jsx.jsxs("section", { style: cardStyle, "aria-labelledby": "dsh-token-activity-title", children: [
+        jsx.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between" }, children: [
+          jsx.jsx("div", { id: "dsh-token-activity-title", style: { color: "var(--dsw-alias-label-primary)", fontSize: "13px", fontWeight: 600 }, children: "Token 活动" }),
+          usage ? jsx.jsx("div", { style: { color: "var(--dsw-alias-label-caption)", fontSize: "11px" }, children: `${quotaSourceLabel(usage.source)}${usage.estimated ? " · 含估算" : ""}` }) : null
+        ] }),
         usageFailed
-          ? jsx.jsx("div", { style: { ...descriptionStyle, marginTop: "10px" }, children: "用量数据暂不可用（服务未就绪，可能需要重启 DSH）" })
+          ? jsx.jsx("div", { role: "alert", style: { ...descriptionStyle, marginTop: "12px", color: "var(--dsw-alias-state-error-primary, #d92d20)" }, children: `近 12 个月用量暂不可用：${usageFailed}` })
           : usage === null
-            ? jsx.jsx("div", { style: { ...descriptionStyle, marginTop: "10px" }, children: "正在加载用量数据…" })
-            : jsx.jsxs("div", { style: { display: "flex", flexWrap: "wrap", gap: "4px", marginTop: "2px" }, children: cells.map((cell) => {
-              if (!cell) return jsx.jsx("div", { style: { width: "26px", height: "26px" } });
-              const used = cell.usage !== null;
-              const cellStyle = used
-                ? { background: "var(--dsw-alias-brand-primary, #2e7cf6)", color: "#fff" }
-                : cell.future
-                  ? { background: "transparent", color: "var(--dsw-alias-label-caption)", border: "1px dashed var(--dsw-alias-border-l1)" }
-                  : { background: "var(--dsw-alias-bg-layer-2, rgba(128,128,128,.18))", color: "var(--dsw-alias-label-tertiary)" };
-              return jsx.jsx("div", {
-                onMouseEnter: (event: { clientX: number; clientY: number }) => { if (!cell.future) setHover({ x: event.clientX, y: event.clientY, cell }); },
-                onMouseMove: (event: { clientX: number; clientY: number }) => { if (hover && hover.cell.date === cell.date) setHover({ x: event.clientX, y: event.clientY, cell }); },
-                onMouseLeave: () => setHover((prev) => (prev && prev.cell.date === cell.date ? null : prev)),
-                style: { width: "26px", height: "26px", borderRadius: "7px", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "11px", lineHeight: 1, cursor: cell.future ? "default" : "pointer", fontVariantNumeric: "tabular-nums", ...cellStyle },
-                children: cell.day
-              });
-            }) }),
-        monthHasUsage
-          ? jsx.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "10px", marginTop: "10px", color: "var(--dsw-alias-label-caption)", fontSize: "11px", lineHeight: 1.5 }, children: [
-            legendItem("var(--dsw-alias-bg-layer-2, rgba(128,128,128,.18))", "无消耗"),
-            legendItem("var(--dsw-alias-brand-primary, #2e7cf6)", "有消耗"),
-            jsx.jsx("span", { children: "悬停查看当日详情 · 额度为按模型单价估算" })
-          ] })
-          : null
+            ? jsx.jsx("div", { style: { ...descriptionStyle, marginTop: "12px" }, children: "正在加载近 12 个月用量…" })
+            : jsx.jsxs("div", { style: { overflowX: "auto", marginTop: "12px", paddingBottom: "4px" }, children: [
+              jsx.jsxs("div", { style: { position: "relative", width: "100%", minWidth: "490px" }, children: [
+                jsx.jsx("div", { "aria-hidden": true, style: { position: "relative", height: "18px", color: "var(--dsw-alias-label-caption)", fontSize: "10px", lineHeight: "14px" }, children: heatmap.months.map((item) => jsx.jsx("span", { key: `${item.label}-${item.week}`, style: { position: "absolute", insetInlineStart: `${(item.week / Math.max(1, heatmap.weeks)) * 100}%`, whiteSpace: "nowrap" }, children: item.label })) }),
+                jsx.jsx("div", { role: "grid", "aria-label": `${quotaMonthLabel(fromMonth)}至${quotaMonthLabel(currentMonth)}每日 Token 活动`, "aria-rowcount": 7, "aria-colcount": heatmap.weeks, style: { display: "grid", gridAutoFlow: "column", gridTemplateRows: "repeat(7, 8px)", gridAutoColumns: "minmax(7px, 1fr)", columnGap: "2px", rowGap: "2px" }, children: heatmap.cells.map((cell) => {
+                  if (!cell.inRange) return jsx.jsx("span", { key: cell.date, "aria-hidden": true, style: { width: "100%", minWidth: "7px", height: "8px" } });
+                  const tokens = quotaTotalTokens(cell.usage ?? undefined);
+                  const level = cell.future ? 0 : quotaIntensity(tokens, maxDayTokens);
+                  const source = quotaSourceLabel(cell.usage?.source ?? usage.source);
+                  const label = `${cell.date}，总 Token ${quotaFormatTokens(tokens)}，输入 ${quotaFormatTokens(cell.usage?.inputTokens ?? 0)}，输出 ${quotaFormatTokens(cell.usage?.outputTokens ?? 0)}，缓存 ${quotaFormatTokens(cell.usage?.cacheReadTokens ?? 0)}，费用 ${quotaFormatCost(cell.usage?.cost ?? 0)}，请求 ${cell.usage?.requests ?? 0} 次，来源 ${source}`;
+                  const focused = focusedDate === cell.date;
+                  return jsx.jsx("button", {
+                    type: "button",
+                    role: "gridcell",
+                    tabIndex: cell.date === activeDate ? 0 : -1,
+                    "data-quota-date": cell.date,
+                    "aria-label": label,
+                    "aria-describedby": hover?.cell.date === cell.date ? "dsh-quota-tooltip" : undefined,
+                    onKeyDown: handleCellKey,
+                    onFocus: (event: { currentTarget: HTMLElement }) => { const rect = event.currentTarget.getBoundingClientRect(); setActiveDate(cell.date); setFocusedDate(cell.date); setHover({ x: rect.right, y: rect.top, cell, mode: "keyboard" }); },
+                    onBlur: () => { setFocusedDate(null); setHover((value) => value?.mode === "keyboard" && value.cell.date === cell.date ? null : value); },
+                    onMouseEnter: (event: { clientX: number; clientY: number }) => setHover({ x: event.clientX, y: event.clientY, cell, mode: "pointer" }),
+                    onMouseMove: (event: { clientX: number; clientY: number }) => setHover({ x: event.clientX, y: event.clientY, cell, mode: "pointer" }),
+                    onMouseLeave: (event: { currentTarget: HTMLElement }) => { if (document.activeElement === event.currentTarget) { const rect = event.currentTarget.getBoundingClientRect(); setHover({ x: rect.right, y: rect.top, cell, mode: "keyboard" }); } else setHover(null); },
+                    key: cell.date,
+                    style: { appearance: "none", width: "100%", height: "8px", minWidth: "7px", minHeight: "8px", padding: 0, border: "1px solid var(--dsw-alias-border-l1)", borderRadius: "3px", background: level === 0 ? "var(--dsw-alias-bg-layer-2, rgba(128,128,128,.18))" : "var(--dsw-alias-brand-primary, #2e7cf6)", opacity: level === 0 ? (cell.future ? 0.35 : 0.72) : [0, 0.28, 0.48, 0.7, 1][level], cursor: "pointer", outline: focused ? "2px solid var(--dsw-alias-brand-primary, #2e7cf6)" : "none", outlineOffset: focused ? "2px" : "0" }
+                  });
+                }) })
+              ] }),
+              jsx.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "flex-end", gap: "5px", marginTop: "8px", color: "var(--dsw-alias-label-caption)", fontSize: "10px" }, children: [
+                jsx.jsx("span", { children: "少" }),
+                [0, 1, 2, 3, 4].map((level) => jsx.jsx("span", { key: level, style: { width: "10px", height: "10px", border: "1px solid var(--dsw-alias-border-l1)", borderRadius: "3px", background: level === 0 ? "var(--dsw-alias-bg-layer-2, rgba(128,128,128,.18))" : "var(--dsw-alias-brand-primary, #2e7cf6)", opacity: level === 0 ? 0.72 : [0, 0.28, 0.48, 0.7, 1][level] } })),
+                jsx.jsx("span", { children: "多" })
+              ] })
+            ] })
+      ] }),
+      jsx.jsxs("section", { style: cardStyle, "aria-labelledby": "dsh-model-ranking-title", children: [
+        jsx.jsxs("div", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: "12px" }, children: [
+          jsx.jsx("div", { id: "dsh-model-ranking-title", style: { color: "var(--dsw-alias-label-primary)", fontSize: "13px", fontWeight: 600 }, children: "模型消耗" }),
+          jsx.jsx("div", { style: { color: "var(--dsw-alias-label-caption)", fontSize: "11px" }, children: "按 Token 排序" })
+        ] }),
+        usageFailed ? jsx.jsx("div", { style: { ...descriptionStyle, marginTop: "10px" }, children: "用量恢复后将显示模型排行。" })
+          : usage === null ? jsx.jsx("div", { style: { ...descriptionStyle, marginTop: "10px" }, children: "正在加载模型消耗…" })
+            : models.length === 0 ? jsx.jsx("div", { style: { ...descriptionStyle, marginTop: "10px" }, children: "近 12 个月暂无可归属到模型的消耗。同步开放平台后可补全历史模型数据。" })
+              : jsx.jsx("div", { role: "list", style: { display: "flex", flexDirection: "column", gap: "12px", marginTop: "12px" }, children: models.map((model) => {
+                const ratio = rangeTokens > 0 ? model.tokens / rangeTokens : 0;
+                return jsx.jsxs("div", { key: model.name, role: "listitem", style: { paddingTop: "12px", borderTop: "1px solid var(--dsw-alias-border-l1)" }, children: [
+                  jsx.jsxs("div", { style: { display: "flex", justifyContent: "space-between", gap: "12px", alignItems: "baseline" }, children: [
+                    jsx.jsx("div", { style: { minWidth: 0, color: "var(--dsw-alias-label-primary)", fontSize: "12px", fontWeight: 600, overflowWrap: "anywhere" }, children: model.name }),
+                    jsx.jsx("div", { style: { flexShrink: 0, color: "var(--dsw-alias-label-secondary)", fontSize: "12px", fontVariantNumeric: "tabular-nums" }, children: `${quotaFormatTokens(model.tokens)} · ${(ratio * 100).toFixed(ratio >= 0.1 ? 1 : 2)}%` })
+                  ] }),
+                  jsx.jsx("div", { style: { height: "5px", marginTop: "7px", borderRadius: "999px", overflow: "hidden", background: "var(--dsw-alias-bg-layer-2, rgba(128,128,128,.18))" }, children: jsx.jsx("div", { style: { width: `${Math.max(0, Math.min(100, ratio * 100))}%`, height: "100%", borderRadius: "inherit", background: "var(--dsw-alias-brand-primary, #2e7cf6)" } }) }),
+                  jsx.jsx("div", { style: { marginTop: "6px", color: "var(--dsw-alias-label-tertiary)", fontSize: "11px", lineHeight: 1.55, fontVariantNumeric: "tabular-nums" }, children: `费用 ${quotaFormatCost(model.totals.cost)} · 请求 ${model.totals.requests} 次 · 输入 ${quotaFormatTokens(model.totals.inputTokens)} · 缓存 ${quotaFormatTokens(model.totals.cacheReadTokens)} · 输出 ${quotaFormatTokens(model.totals.outputTokens)}` })
+                ] });
+              }) })
       ] }),
       hover ? jsx.jsx("div", {
+        id: "dsh-quota-tooltip",
+        role: "tooltip",
         style: {
           position: "fixed",
           left: Math.max(8, Math.min(hover.x + 14, window.innerWidth - 260)),
@@ -1442,20 +1613,23 @@ function installQuotaSettingsSection(ctx: ClientContextLike): void {
           fontSize: "12px",
           lineHeight: 1.6,
           boxShadow: "0 6px 24px rgba(0,0,0,.28)",
-          whiteSpace: "nowrap"
+          whiteSpace: "nowrap",
+          maxWidth: "min(320px, calc(100vw - 16px))"
         },
         children: [
           jsx.jsx("div", { style: { fontWeight: 600 }, children: `${quotaMonthLabel(hover.cell.date.slice(0, 7))}${Number(hover.cell.date.slice(8, 10))}日` }),
           hover.cell.usage
             ? jsx.jsxs("div", { children: [
-                jsx.jsx("div", { children: `额度 ${quotaFormatCost(hover.cell.usage.cost)}` }),
-                jsx.jsx("div", { children: `Token ${quotaFormatTokens(quotaTotalTokens(hover.cell.usage))}` }),
-                jsx.jsx("div", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: "11px" }, children: `请求 ${hover.cell.usage.requests} 次 · 输入 ${quotaFormatTokens(hover.cell.usage.inputTokens)} / 输出 ${quotaFormatTokens(hover.cell.usage.outputTokens)}` })
+                jsx.jsx("div", { children: `总 Token ${quotaFormatTokens(quotaTotalTokens(hover.cell.usage))} · ${quotaFormatCost(hover.cell.usage.cost)}` }),
+                jsx.jsx("div", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: "11px" }, children: `输入 ${quotaFormatTokens(hover.cell.usage.inputTokens)} · 缓存 ${quotaFormatTokens(hover.cell.usage.cacheReadTokens)} · 输出 ${quotaFormatTokens(hover.cell.usage.outputTokens)}` }),
+                jsx.jsx("div", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: "11px" }, children: `请求 ${hover.cell.usage.requests} 次 · ${quotaSourceLabel(hover.cell.usage.source ?? usage?.source)}` })
               ] })
-            : jsx.jsx("div", { children: "当日无消耗" })
+            : jsx.jsxs("div", { children: [
+                jsx.jsx("div", { children: "当日无消耗" }),
+                jsx.jsx("div", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: "11px" }, children: `输入 0 · 缓存 0 · 输出 0 · 费用 ¥0 · 请求 0 次 · ${quotaSourceLabel(usage?.source)}` })
+              ] })
         ]
       }) : null
-      ] })
     ] });
   };
   slots.inject("settings.section", () => slots.register({ name: "settings.section", id: "quota", order: 17, label: "额度查看", registrant: "@dsh-skin/dsh-plugin" }, section));

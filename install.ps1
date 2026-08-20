@@ -29,7 +29,7 @@ $skillRoot = Join-Path $projectRoot "agents\codex-skill\deepseek-harness-skin-st
 if (-not (Test-Path -LiteralPath (Join-Path $skillRoot "SKILL.md") -PathType Leaf)) {
   throw "Skill folder not found: $skillRoot"
 }
-if ([string]::IsNullOrWhiteSpace($DshHome)) { $DshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $USERPROFILE ".dsh" } }
+if ([string]::IsNullOrWhiteSpace($DshHome)) { $DshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE ".dsh" } }
 $DshHome = [IO.Path]::GetFullPath($DshHome)
 if ([string]::IsNullOrWhiteSpace($DataDir)) { $DataDir = Join-Path $env:LOCALAPPDATA "DeepSeekHarnessSkinStudio" }
 $DataDir = [IO.Path]::GetFullPath($DataDir)
